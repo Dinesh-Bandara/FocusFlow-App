@@ -13,10 +13,20 @@ class MainActivity : ReactActivity() {
    */
   override fun getMainComponentName(): String = "FocusFlow"
 
-  /**
-   * Returns the instance of the [ReactActivityDelegate]. We use [DefaultReactActivityDelegate]
-   * which allows you to enable New Architecture with a single boolean flags [fabricEnabled]
-   */
   override fun createReactActivityDelegate(): ReactActivityDelegate =
-      DefaultReactActivityDelegate(this, mainComponentName, fabricEnabled)
+      object : DefaultReactActivityDelegate(this, mainComponentName, fabricEnabled) {
+          override fun getLaunchOptions(): android.os.Bundle? {
+              val initialProperties = android.os.Bundle()
+              val intent = intent
+              if (intent != null) {
+                  if (intent.hasExtra("START_FOCUS_FROM_ALARM")) {
+                      initialProperties.putBoolean("startupStartFocus", intent.getBooleanExtra("START_FOCUS_FROM_ALARM", false))
+                  }
+                  if (intent.hasExtra("EVENT_ID")) {
+                      initialProperties.putString("startupEventId", intent.getStringExtra("EVENT_ID"))
+                  }
+              }
+              return initialProperties
+          }
+      }
 }
