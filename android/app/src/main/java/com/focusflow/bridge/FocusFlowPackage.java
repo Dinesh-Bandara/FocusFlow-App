@@ -20,6 +20,7 @@ public class FocusFlowPackage implements ReactPackage {
         List<NativeModule> modules = new ArrayList<>();
         modules.add(new TrackingModule(reactContext));
         modules.add(new ReminderModule(reactContext));
+        modules.add(new SplashModule(reactContext));
         // Add other modules here as we implement them!
         return modules;
     }

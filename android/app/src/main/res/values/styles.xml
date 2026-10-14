@@ -1,9 +1,27 @@
-<resources>
+<resources xmlns:tools="http://schemas.android.com/tools">
 
-    <!-- Base application theme. -->
-    <style name="AppTheme" parent="Theme.AppCompat.DayNight.NoActionBar">
-        <!-- Customize your theme here. -->
+    <!-- Base application theme: Light theme only, no dark mode inversion -->
+    <style name="AppTheme" parent="Theme.AppCompat.Light.NoActionBar">
         <item name="android:editTextBackground">@drawable/rn_edit_text_material</item>
+        <item name="android:windowBackground">#F7F8FF</item>
+        <item name="android:colorBackground">#F7F8FF</item>
+        <item name="android:forceDarkAllowed" tools:targetApi="q">false</item>
+        <item name="android:statusBarColor">#F7F8FF</item>
+        <item name="android:windowLightStatusBar">true</item>
+    </style>
+
+    <!-- Splash screen launch theme using AndroidX SplashScreen -->
+    <style name="Theme.App.Starting" parent="Theme.SplashScreen">
+        <item name="android:windowBackground">#F7F8FF</item>
+        <item name="android:windowSplashScreenBackground">#F7F8FF</item>
+        <item name="android:windowSplashScreenAnimatedIcon">@drawable/focusflow_system_splash</item>
+        <item name="android:windowSplashScreenIconBackgroundColor">#F7F8FF</item>
+        <item name="windowSplashScreenBackground">#F7F8FF</item>
+        <item name="windowSplashScreenAnimatedIcon">@drawable/focusflow_system_splash</item>
+        <item name="postSplashScreenTheme">@style/AppTheme</item>
+        <item name="android:forceDarkAllowed" tools:targetApi="q">false</item>
+        <item name="android:statusBarColor">#F7F8FF</item>
+        <item name="android:windowLightStatusBar">true</item>
     </style>
 
 </resources>
