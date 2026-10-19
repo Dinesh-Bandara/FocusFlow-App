@@ -1,284 +1,513 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
-import { AppState, NativeModules } from 'react-native';
+import { AppState, Alert, NativeModules } from 'react-native';
 import { FocusStorageService } from '../Services/FocusStorageService';
 import { TargetStorageService } from '../Services/TargetStorageService';
+import SQLite from 'react-native-sqlite-storage';
 
 const { NativeTracking } = NativeModules;
+const db = SQLite.openDatabase({ name: 'focusflow.db', location: 'default' });
+
+// Format milliseconds into "5m", "1h 8m", "<1m"
+export function formatUsageDuration(ms) {
+  if (!ms || ms < 60000) return '<1m';
+  const totalMin = Math.round(ms / 60000);
+  if (totalMin < 60) return `${totalMin}m`;
+  const hours = Math.floor(totalMin / 60);
+  const remMin = totalMin % 60;
+  return remMin > 0 ? `${hours}h ${remMin}m` : `${hours}h`;
+}
 
 export function useFocusSession(routeParams = {}) {
-    const initialTitle = routeParams.sessionTitle || 'Focus Session';
-    const initialDurationMin = routeParams.durationMinutes || 25;
-    const initialEventId = routeParams.eventId || null;
-    const initialStartTime = routeParams.startTime || null;
-    const initialEndTime = routeParams.endTime || null;
+  const initialTitle = routeParams.sessionTitle || 'Focus Session';
+  const initialDurationMin = routeParams.durationMinutes || 25;
+  const initialEventId = routeParams.eventId || null;
+  const initialStartTime = routeParams.startTime || null;
+  const initialEndTime = routeParams.endTime || null;
 
-    const totalSeconds = initialDurationMin * 60;
+  // Session state: 'idle' | 'running' | 'paused' | 'completed' | 'ended_early'
+  const [status, setStatus] = useState('idle');
+  const [sessionTitle, setSessionTitle] = useState(initialTitle);
+  const [eventId, setEventId] = useState(initialEventId);
+  const [slotStartTime, setSlotStartTime] = useState(initialStartTime);
+  const [slotEndTime, setSlotEndTime] = useState(initialEndTime);
 
-    // Session state: 'idle' | 'running' | 'paused' | 'completed' | 'ended_early'
-    const [status, setStatus] = useState('idle');
-    const [sessionTitle, setSessionTitle] = useState(initialTitle);
-    const [secondsLeft, setSecondsLeft] = useState(totalSeconds);
-    const [showSummary, setShowSummary] = useState(false);
-    const [unlocksCount, setUnlocksCount] = useState(0);
-    const [distractingMin, setDistractingMin] = useState(0);
+  // Planned slot duration vs remaining slot time vs recorded focus time
+  const [plannedMinutes, setPlannedMinutes] = useState(initialDurationMin);
+  const [secondsLeft, setSecondsLeft] = useState(initialDurationMin * 60);
+  const [recordedFocusSeconds, setRecordedFocusSeconds] = useState(0);
 
-    // References for robust wall-clock timing and idempotency
-    const sessionIdRef = useRef(initialEventId ? `session_${initialEventId}` : `session_${Date.now()}`);
-    const targetEndTimeRef = useRef(null);
-    const sessionStartMsRef = useRef(null);
-    const startUnlocksRef = useRef(0);
-    const sessionSavedRef = useRef(false);
+  // Distraction & Unlock metrics
+  const [unlocksCount, setUnlocksCount] = useState(0);
+  const [distractingMin, setDistractingMin] = useState(0);
+  const [distractingBreakdown, setDistractingBreakdown] = useState([]);
+  const [showSummary, setShowSummary] = useState(false);
 
-    // 1. Recover active session from storage on mount (if app was backgrounded/killed)
-    useEffect(() => {
-        let isMounted = true;
+  // References for timing & intervals
+  const sessionIdRef = useRef(initialEventId ? `session_${initialEventId}` : `session_${Date.now()}`);
+  const activeIntervalsRef = useRef([]); // [ { start: ms, end: ms } ]
+  const currentIntervalStartRef = useRef(null);
+  const sessionSavedRef = useRef(false);
+  const isCalendarLinkedRef = useRef(!!initialEndTime);
 
-        async function checkSavedSession() {
-            const saved = await TargetStorageService.getActiveSession();
-            if (!isMounted || !saved) return;
+  // 1. Initial configuration: calculate real remaining slot duration if calendar-linked
+  useEffect(() => {
+    if (initialEndTime && initialStartTime) {
+      isCalendarLinkedRef.current = true;
+      const planned = Math.max(1, Math.round((initialEndTime - initialStartTime) / 60000));
+      setPlannedMinutes(planned);
 
-            if (saved.sessionId) sessionIdRef.current = saved.sessionId;
-            if (saved.sessionTitle) setSessionTitle(saved.sessionTitle);
-            if (saved.sessionStartMs) sessionStartMsRef.current = saved.sessionStartMs;
+      const now = Date.now();
+      const remainingSec = Math.max(0, Math.round((initialEndTime - now) / 1000));
+      setSecondsLeft(remainingSec);
+      setSlotStartTime(initialStartTime);
+      setSlotEndTime(initialEndTime);
+      setSessionTitle(initialTitle);
+      setEventId(initialEventId);
+    } else if (initialEventId && !initialEndTime) {
+      // Query SQLite calendar_events table if only eventId was provided
+      db.transaction(tx => {
+        tx.executeSql(
+          'SELECT title, start_time, end_time FROM calendar_events WHERE id = ?',
+          [initialEventId],
+          (t, results) => {
+            if (results.rows.length > 0) {
+              const row = results.rows.item(0);
+              const s = row.start_time;
+              const e = row.end_time;
+              const planned = Math.max(1, Math.round((e - s) / 60000));
+              const now = Date.now();
+              const remainingSec = Math.max(0, Math.round((e - now) / 1000));
 
-            if (saved.isPaused) {
-                setStatus('paused');
-                setSecondsLeft(saved.secondsLeft || 0);
-                targetEndTimeRef.current = null;
-            } else if (saved.targetEndTimeMs) {
-                const now = Date.now();
-                const remaining = Math.max(0, Math.round((saved.targetEndTimeMs - now) / 1000));
-                if (remaining <= 0) {
-                    // Completed while in background!
-                    setStatus('completed');
-                    setSecondsLeft(0);
-                    setShowSummary(true);
-                    targetEndTimeRef.current = null;
-                } else {
-                    setStatus('running');
-                    setSecondsLeft(remaining);
-                    targetEndTimeRef.current = saved.targetEndTimeMs;
-                }
+              isCalendarLinkedRef.current = true;
+              setSessionTitle(row.title || initialTitle);
+              setPlannedMinutes(planned);
+              setSecondsLeft(remainingSec);
+              setSlotStartTime(s);
+              setSlotEndTime(e);
             }
-        }
+          }
+        );
+      });
+    }
+  }, [initialEventId, initialStartTime, initialEndTime, initialTitle]);
 
-        checkSavedSession();
+  // 2. Recover active session from storage & prompt if switching different session
+  useEffect(() => {
+    let isMounted = true;
 
-        return () => {
-            isMounted = false;
-        };
-    }, []);
+    async function checkSavedSession() {
+      const saved = await TargetStorageService.getActiveSession();
+      if (!isMounted || !saved) return;
 
-    // 2. Handle AppState transitions (Background -> Foreground wall-clock sync)
-    useEffect(() => {
-        const subscription = AppState.addEventListener('change', async (nextAppState) => {
-            if (nextAppState === 'active' && status === 'running' && targetEndTimeRef.current) {
-                const now = Date.now();
-                const remaining = Math.max(0, Math.round((targetEndTimeRef.current - now) / 1000));
-                setSecondsLeft(remaining);
+      const incomingId = initialEventId ? `session_${initialEventId}` : null;
 
-                if (remaining <= 0) {
-                    setStatus('completed');
-                    setShowSummary(true);
-                    targetEndTimeRef.current = null;
-                    await TargetStorageService.clearActiveSession();
-                } else {
-                    // Update distraction stats on resume
-                    updateDistractions();
-                }
-            }
-        });
+      // If incoming session is different from existing running session, ask user
+      if (incomingId && saved.sessionId && incomingId !== saved.sessionId && saved.status === 'running') {
+        Alert.alert(
+          'Session in Progress',
+          `You have an active session "${saved.sessionTitle}". Do you want to conclude it and switch to "${initialTitle}"?`,
+          [
+            {
+              text: 'Keep Current',
+              onPress: () => {
+                // Restore current running session
+                restoreSavedSession(saved);
+              },
+            },
+            {
+              text: 'Switch Session',
+              style: 'destructive',
+              onPress: async () => {
+                await TargetStorageService.clearActiveSession();
+                // Start fresh with incoming session
+              },
+            },
+          ]
+        );
+        return;
+      }
 
-        return () => {
-            subscription.remove();
-        };
-    }, [status]);
+      restoreSavedSession(saved);
+    }
 
-    // 3. Countdown interval when running
-    useEffect(() => {
-        let timer = null;
+    function restoreSavedSession(saved) {
+      if (!isMounted) return;
+      sessionIdRef.current = saved.sessionId;
+      if (saved.sessionTitle) setSessionTitle(saved.sessionTitle);
+      if (saved.plannedMinutes) setPlannedMinutes(saved.plannedMinutes);
+      if (saved.slotStartTime) setSlotStartTime(saved.slotStartTime);
+      if (saved.slotEndTime) {
+        setSlotEndTime(saved.slotEndTime);
+        isCalendarLinkedRef.current = true;
+      }
+      if (saved.activeIntervals) activeIntervalsRef.current = saved.activeIntervals;
+      if (saved.recordedFocusSeconds) setRecordedFocusSeconds(saved.recordedFocusSeconds);
 
-        if (status === 'running') {
-            timer = setInterval(() => {
-                if (!targetEndTimeRef.current) return;
-
-                const now = Date.now();
-                const remaining = Math.max(0, Math.round((targetEndTimeRef.current - now) / 1000));
-                setSecondsLeft(remaining);
-
-                if (remaining <= 0) {
-                    clearInterval(timer);
-                    setStatus('completed');
-                    setShowSummary(true);
-                    TargetStorageService.clearActiveSession();
-                }
-            }, 1000);
-        }
-
-        return () => {
-            if (timer) clearInterval(timer);
-        };
-    }, [status]);
-
-    // 4. Update distraction statistics during session
-    const updateDistractions = useCallback(async () => {
-        if (!sessionStartMsRef.current) return;
-        try {
-            if (NativeTracking?.getUnlockCountRange) {
-                const count = await NativeTracking.getUnlockCountRange(
-                    sessionStartMsRef.current,
-                    Date.now()
-                );
-                setUnlocksCount(count || 0);
-            }
-        } catch (e) {
-            // ignore
-        }
-    }, []);
-
-    // Periodic distraction check every 15s while running
-    useEffect(() => {
-        let interval = null;
-        if (status === 'running') {
-            updateDistractions();
-            interval = setInterval(updateDistractions, 15000);
-        }
-        return () => {
-            if (interval) clearInterval(interval);
-        };
-    }, [status, updateDistractions]);
-
-    // 5. Actions: Start, Pause, Resume, End Early
-    const startSession = async () => {
-        const now = Date.now();
-        sessionStartMsRef.current = now;
-        sessionSavedRef.current = false;
-        const targetEnd = now + secondsLeft * 1000;
-        targetEndTimeRef.current = targetEnd;
-
-        setStatus('running');
-
-        await TargetStorageService.setActiveSession({
-            sessionId: sessionIdRef.current,
-            sessionTitle,
-            totalSeconds,
-            targetEndTimeMs: targetEnd,
-            isPaused: false,
-            secondsLeft,
-            sessionStartMs: now,
-        });
-    };
-
-    const pauseSession = async () => {
+      const now = Date.now();
+      if (saved.status === 'paused') {
         setStatus('paused');
-        targetEndTimeRef.current = null;
-
-        await TargetStorageService.setActiveSession({
-            sessionId: sessionIdRef.current,
-            sessionTitle,
-            totalSeconds,
-            targetEndTimeMs: null,
-            isPaused: true,
-            secondsLeft,
-            sessionStartMs: sessionStartMsRef.current,
-        });
-    };
-
-    const resumeSession = async () => {
-        const now = Date.now();
-        const targetEnd = now + secondsLeft * 1000;
-        targetEndTimeRef.current = targetEnd;
-
-        setStatus('running');
-
-        await TargetStorageService.setActiveSession({
-            sessionId: sessionIdRef.current,
-            sessionTitle,
-            totalSeconds,
-            targetEndTimeMs: targetEnd,
-            isPaused: false,
-            secondsLeft,
-            sessionStartMs: sessionStartMsRef.current,
-        });
-    };
-
-    const togglePlayPause = () => {
-        if (status === 'idle') {
-            startSession();
-        } else if (status === 'running') {
-            pauseSession();
-        } else if (status === 'paused') {
-            resumeSession();
+        setSecondsLeft(saved.secondsLeft || 0);
+      } else if (saved.status === 'running') {
+        let remaining = saved.secondsLeft;
+        if (saved.slotEndTime) {
+          remaining = Math.max(0, Math.round((saved.slotEndTime - now) / 1000));
         }
-    };
 
-    const endSessionEarly = () => {
-        setStatus('ended_early');
-        targetEndTimeRef.current = null;
-        setShowSummary(true);
-        TargetStorageService.clearActiveSession();
-    };
-
-    // 6. Complete outcome: Save to SQLite exactly once
-    const recordOutcome = async (taskCompleted) => {
-        if (sessionSavedRef.current) {
-            console.log('Session already saved, ignoring redundant recordOutcome call');
-            setShowSummary(false);
-            return;
+        if (remaining <= 0) {
+          // Completed while app was closed/backgrounded
+          setStatus('completed');
+          setSecondsLeft(0);
+          setShowSummary(true);
+        } else {
+          setStatus('running');
+          setSecondsLeft(remaining);
+          currentIntervalStartRef.current = saved.lastResumedAtMs || now;
         }
-        sessionSavedRef.current = true;
+      }
+    }
 
-        const elapsedSeconds = totalSeconds - secondsLeft;
-        const durationMs = Math.max(1000, elapsedSeconds * 1000);
-        const startMs = sessionStartMsRef.current || (Date.now() - durationMs);
+    checkSavedSession();
 
+    return () => {
+      isMounted = false;
+    };
+  }, [initialEventId, initialTitle]);
+
+  // 3. Periodic metric measurement (unlocks & distracting apps across active intervals)
+  const refreshMetrics = useCallback(async () => {
+    try {
+      // Build full list of intervals including currently running interval
+      const intervals = [...activeIntervalsRef.current];
+      if (currentIntervalStartRef.current && status === 'running') {
+        intervals.push({ start: currentIntervalStartRef.current, end: Date.now() });
+      }
+
+      if (intervals.length === 0) return;
+
+      // 1. Measure unlocks strictly within active intervals
+      let totalUnlocks = 0;
+      if (NativeTracking?.getUnlockCountRange) {
+        for (const interval of intervals) {
+          if (interval.end > interval.start) {
+            const count = await NativeTracking.getUnlockCountRange(interval.start, interval.end);
+            totalUnlocks += (count || 0);
+          }
+        }
+      }
+      setUnlocksCount(totalUnlocks);
+
+      // 2. Measure distracting app usage strictly within active intervals
+      const userDistractingList = await TargetStorageService.getDistractingApps();
+      const distractingSet = new Set(userDistractingList);
+      const appUsageAccumulator = {}; // { [pkg]: totalMs }
+
+      if (NativeTracking?.getUsageRange) {
+        for (const interval of intervals) {
+          if (interval.end > interval.start) {
+            const usageMap = await NativeTracking.getUsageRange(interval.start, interval.end);
+            if (usageMap) {
+              for (const [pkg, durationMs] of Object.entries(usageMap)) {
+                if (distractingSet.has(pkg) && durationMs > 0) {
+                  appUsageAccumulator[pkg] = (appUsageAccumulator[pkg] || 0) + durationMs;
+                }
+              }
+            }
+          }
+        }
+      }
+
+      let totalDistractingMs = 0;
+      const packagesWithUsage = Object.keys(appUsageAccumulator);
+
+      for (const pkg of packagesWithUsage) {
+        totalDistractingMs += appUsageAccumulator[pkg];
+      }
+
+      const totalDistractingMin = Math.round(totalDistractingMs / 60000);
+      setDistractingMin(totalDistractingMin);
+
+      // Retrieve real app metadata (app label & icon)
+      if (packagesWithUsage.length > 0 && NativeTracking?.getAppsMetadata) {
         try {
-            await FocusStorageService.saveFocusSession({
-                sessionId: sessionIdRef.current,
-                startTime: startMs,
-                durationMs,
-                status: status === 'ended_early' ? 'ended_early' : 'completed',
-                sessionTitle,
-                taskCompleted: taskCompleted ? 1 : 0,
-            });
+          const metaMap = await NativeTracking.getAppsMetadata(packagesWithUsage);
+          const breakdown = packagesWithUsage.map(pkg => ({
+            packageName: pkg,
+            appName: metaMap?.[pkg]?.appName || pkg.split('.').pop(),
+            icon: metaMap?.[pkg]?.icon || null,
+            durationMs: appUsageAccumulator[pkg],
+            formattedDuration: formatUsageDuration(appUsageAccumulator[pkg]),
+          }));
+          breakdown.sort((a, b) => b.durationMs - a.durationMs);
+          setDistractingBreakdown(breakdown);
         } catch (e) {
-            console.error('Failed to save focus session outcome:', e);
-        } finally {
-            await TargetStorageService.clearActiveSession();
-            setShowSummary(false);
-            setStatus('idle');
-            setSecondsLeft(totalSeconds);
+          console.warn('Error fetching apps metadata:', e);
         }
+      } else {
+        setDistractingBreakdown([]);
+      }
+    } catch (e) {
+      console.warn('Error refreshing session metrics:', e);
+    }
+  }, [status]);
+
+  // AppState change: foreground return syncs clock & metrics immediately
+  useEffect(() => {
+    const sub = AppState.addEventListener('change', async nextState => {
+      if (nextState === 'active' && status === 'running') {
+        const now = Date.now();
+        if (slotEndTime) {
+          const rem = Math.max(0, Math.round((slotEndTime - now) / 1000));
+          setSecondsLeft(rem);
+          if (rem <= 0) {
+            handleCompleteSession();
+            return;
+          }
+        }
+        refreshMetrics();
+      }
+    });
+
+    return () => {
+      sub.remove();
     };
+  }, [status, slotEndTime, refreshMetrics]);
 
-    const elapsedSeconds = totalSeconds - secondsLeft;
-    const progressFraction = totalSeconds > 0
-        ? Math.max(0, Math.min(1, elapsedSeconds / totalSeconds))
-        : 0;
+  // Timer interval: 1-second ticks while running
+  useEffect(() => {
+    let timer = null;
 
-    return {
-        status,
-        isActive: status === 'running',
-        isPaused: status === 'paused',
-        isIdle: status === 'idle',
+    if (status === 'running') {
+      timer = setInterval(() => {
+        setRecordedFocusSeconds(prev => prev + 1);
+
+        if (slotEndTime) {
+          // Calendar-linked: derive remaining slot time from timestamps!
+          const now = Date.now();
+          const rem = Math.max(0, Math.round((slotEndTime - now) / 1000));
+          setSecondsLeft(rem);
+
+          if (rem <= 0) {
+            clearInterval(timer);
+            handleCompleteSession();
+          }
+        } else {
+          // Non-calendar countdown
+          setSecondsLeft(prev => {
+            if (prev <= 1) {
+              clearInterval(timer);
+              handleCompleteSession();
+              return 0;
+            }
+            return prev - 1;
+          });
+        }
+      }, 1000);
+    }
+
+    return () => {
+      if (timer) clearInterval(timer);
+    };
+  }, [status, slotEndTime]);
+
+  // Periodic metrics refresh every 15s while running
+  useEffect(() => {
+    let interval = null;
+    if (status === 'running') {
+      refreshMetrics();
+      interval = setInterval(refreshMetrics, 15000);
+    }
+    return () => {
+      if (interval) clearInterval(interval);
+    };
+  }, [status, refreshMetrics]);
+
+  // Actions: Start, Pause, Resume, End Early, Complete
+  const startSession = async () => {
+    const now = Date.now();
+    currentIntervalStartRef.current = now;
+    sessionSavedRef.current = false;
+
+    let initialSecLeft = secondsLeft;
+    if (slotEndTime) {
+      initialSecLeft = Math.max(0, Math.round((slotEndTime - now) / 1000));
+      setSecondsLeft(initialSecLeft);
+    }
+
+    setStatus('running');
+
+    await TargetStorageService.setActiveSession({
+      sessionId: sessionIdRef.current,
+      eventId,
+      sessionTitle,
+      plannedMinutes,
+      slotStartTime,
+      slotEndTime,
+      status: 'running',
+      secondsLeft: initialSecLeft,
+      lastResumedAtMs: now,
+      recordedFocusSeconds,
+      activeIntervals: activeIntervalsRef.current,
+    });
+  };
+
+  const pauseSession = async () => {
+    const now = Date.now();
+    if (currentIntervalStartRef.current) {
+      activeIntervalsRef.current.push({
+        start: currentIntervalStartRef.current,
+        end: now,
+      });
+      currentIntervalStartRef.current = null;
+    }
+
+    setStatus('paused');
+
+    await TargetStorageService.setActiveSession({
+      sessionId: sessionIdRef.current,
+      eventId,
+      sessionTitle,
+      plannedMinutes,
+      slotStartTime,
+      slotEndTime,
+      status: 'paused',
+      secondsLeft,
+      lastResumedAtMs: null,
+      recordedFocusSeconds,
+      activeIntervals: activeIntervalsRef.current,
+    });
+
+    refreshMetrics();
+  };
+
+  const resumeSession = async () => {
+    const now = Date.now();
+    currentIntervalStartRef.current = now;
+
+    let currentSecLeft = secondsLeft;
+    if (slotEndTime) {
+      currentSecLeft = Math.max(0, Math.round((slotEndTime - now) / 1000));
+      setSecondsLeft(currentSecLeft);
+    }
+
+    setStatus('running');
+
+    await TargetStorageService.setActiveSession({
+      sessionId: sessionIdRef.current,
+      eventId,
+      sessionTitle,
+      plannedMinutes,
+      slotStartTime,
+      slotEndTime,
+      status: 'running',
+      secondsLeft: currentSecLeft,
+      lastResumedAtMs: now,
+      recordedFocusSeconds,
+      activeIntervals: activeIntervalsRef.current,
+    });
+  };
+
+  const togglePlayPause = () => {
+    if (status === 'idle') {
+      startSession();
+    } else if (status === 'running') {
+      pauseSession();
+    } else if (status === 'paused') {
+      resumeSession();
+    }
+  };
+
+  const handleCompleteSession = async () => {
+    const now = Date.now();
+    if (currentIntervalStartRef.current) {
+      activeIntervalsRef.current.push({
+        start: currentIntervalStartRef.current,
+        end: now,
+      });
+      currentIntervalStartRef.current = null;
+    }
+    setStatus('completed');
+    setShowSummary(true);
+    await TargetStorageService.clearActiveSession();
+    refreshMetrics();
+  };
+
+  const endSessionEarly = async () => {
+    const now = Date.now();
+    if (currentIntervalStartRef.current) {
+      activeIntervalsRef.current.push({
+        start: currentIntervalStartRef.current,
+        end: now,
+      });
+      currentIntervalStartRef.current = null;
+    }
+    setStatus('ended_early');
+    setShowSummary(true);
+    await TargetStorageService.clearActiveSession();
+    refreshMetrics();
+  };
+
+  // 4. Save completed or ended session to SQLite exactly once
+  const recordOutcome = async (taskCompleted) => {
+    if (sessionSavedRef.current) {
+      setShowSummary(false);
+      return;
+    }
+    sessionSavedRef.current = true;
+
+    const durationMs = Math.max(1000, recordedFocusSeconds * 1000);
+    const startMs = slotStartTime || (Date.now() - durationMs);
+
+    try {
+      await FocusStorageService.saveFocusSession({
+        sessionId: sessionIdRef.current,
+        startTime: startMs,
+        durationMs,
+        status: status === 'ended_early' ? 'ended_early' : 'completed',
         sessionTitle,
-        setSessionTitle,
-        secondsLeft,
-        totalSeconds,
-        elapsedSeconds,
-        progressFraction,
-        showSummary,
-        setShowSummary,
-        unlocksCount,
-        distractingMin,
-        initialDurationMin,
-        initialStartTime,
-        initialEndTime,
-        startSession,
-        pauseSession,
-        resumeSession,
-        togglePlayPause,
-        endSessionEarly,
-        recordOutcome,
-    };
+        taskCompleted: taskCompleted ? 1 : 0,
+      });
+    } catch (e) {
+      console.error('Failed to save focus session outcome:', e);
+    } finally {
+      await TargetStorageService.clearActiveSession();
+      setShowSummary(false);
+      setStatus('idle');
+      activeIntervalsRef.current = [];
+      currentIntervalStartRef.current = null;
+    }
+  };
+
+  const totalSlotSeconds = plannedMinutes * 60;
+  const progressFraction = totalSlotSeconds > 0
+    ? Math.max(0, Math.min(1, (totalSlotSeconds - secondsLeft) / totalSlotSeconds))
+    : 0;
+
+  return {
+    status,
+    isActive: status === 'running',
+    isPaused: status === 'paused',
+    isIdle: status === 'idle',
+    sessionTitle,
+    setSessionTitle,
+    secondsLeft,
+    totalSeconds: totalSlotSeconds,
+    recordedFocusSeconds,
+    plannedMinutes,
+    progressFraction,
+    showSummary,
+    setShowSummary,
+    unlocksCount,
+    distractingMin,
+    distractingBreakdown,
+    initialDurationMin: plannedMinutes,
+    initialStartTime: slotStartTime,
+    initialEndTime: slotEndTime,
+    startSession,
+    pauseSession,
+    resumeSession,
+    togglePlayPause,
+    endSessionEarly,
+    recordOutcome,
+    refreshMetrics,
+  };
 }

@@ -3,7 +3,7 @@ package com.focusflow.storage;
 public class DatabaseSchema {
 
     public static final String DATABASE_NAME = "focusflow.db";
-    public static final int DATABASE_VERSION = 3; // Upgraded for session_title and task_completed
+    public static final int DATABASE_VERSION = 4; // Upgraded for notification_records table
 
     public static final class UsageRecords {
         public static final String TABLE_NAME = "usage_records";
@@ -18,6 +18,21 @@ public class DatabaseSchema {
                 COL_APP_NAME + " TEXT NOT NULL, " +
                 COL_DURATION_MS + " INTEGER NOT NULL DEFAULT 0, " +
                 "UNIQUE(" + COL_DATE + ", " + COL_APP_NAME + "));";
+    }
+
+    public static final class NotificationRecords {
+        public static final String TABLE_NAME = "notification_records";
+        public static final String COL_ID = "id";
+        public static final String COL_TIMESTAMP_MS = "timestamp_ms";
+        public static final String COL_PACKAGE_NAME = "package_name";
+
+        public static final String CREATE_TABLE = "CREATE TABLE IF NOT EXISTS " + TABLE_NAME + " (" +
+                COL_ID + " INTEGER PRIMARY KEY AUTOINCREMENT, " +
+                COL_TIMESTAMP_MS + " INTEGER NOT NULL, " +
+                COL_PACKAGE_NAME + " TEXT NOT NULL);";
+
+        public static final String CREATE_INDEX = "CREATE INDEX IF NOT EXISTS idx_notification_timestamp ON " +
+                TABLE_NAME + " (" + COL_TIMESTAMP_MS + ");";
     }
 
     public static final class NotificationCounts {

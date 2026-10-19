@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="288dp" android:height="288dp"
+    android:viewportWidth="200" android:viewportHeight="200">
+    <!-- Padding keeps the complete square mark inside Android's circular icon mask. -->
+    <group android:translateX="50" android:translateY="50">
+    <path android:fillColor="#5056D8"
+        android:pathData="M22,0H78Q100,0 100,22V78Q100,100 78,100H22Q0,100 0,78V22Q0,0 22,0Z" />
+    <path android:fillColor="@android:color/transparent" android:strokeColor="#FFFFFF"
+        android:strokeWidth="7.5" android:strokeLineCap="round" android:strokeLineJoin="round"
+        android:pathData="M75,52A26,26 0,1 1,50 24" />
+    <path android:fillColor="@android:color/transparent" android:strokeColor="#8094FF"
+        android:strokeWidth="7.5" android:strokeLineCap="round"
+        android:pathData="M57,25A26,26 0,0 1,76 43" />
+    <path android:fillColor="@android:color/transparent" android:strokeColor="#FFFFFF"
+        android:strokeWidth="7.5" android:strokeLineCap="round" android:strokeLineJoin="round"
+        android:pathData="M39,49L47,57L63,41" />
+    </group>
+</vector>

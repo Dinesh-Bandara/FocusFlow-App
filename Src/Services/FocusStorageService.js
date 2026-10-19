@@ -3,49 +3,47 @@ import SQLite from 'react-native-sqlite-storage';
 const db = SQLite.openDatabase({ name: 'focusflow.db', location: 'default' });
 
 let isDbInitialized = false;
+let initializationPromise = null;
 const savedSessionIds = new Set();
 
 export const ensureFocusDbInit = () => {
     if (isDbInitialized) return Promise.resolve();
+    if (initializationPromise) return initializationPromise;
 
-    return new Promise((resolve) => {
+    initializationPromise = new Promise((resolve, reject) => {
         db.transaction((tx) => {
-            // 1. Ensure focus_sessions table exists
             tx.executeSql(
                 `CREATE TABLE IF NOT EXISTS focus_sessions (
-          id INTEGER PRIMARY KEY AUTOINCREMENT,
-          start_time INTEGER NOT NULL,
-          duration_ms INTEGER NOT NULL,
-          status TEXT NOT NULL,
-          session_title TEXT,
-          task_completed INTEGER DEFAULT 0
-        );`,
-                [],
-                () => {
-                    // Attempt adding columns if upgrading an older version 2 DB
-                    tx.executeSql(
-                        'ALTER TABLE focus_sessions ADD COLUMN session_title TEXT;',
-                        [],
-                        () => { },
-                        () => { } // ignore error if column already exists
-                    );
-                    tx.executeSql(
-                        'ALTER TABLE focus_sessions ADD COLUMN task_completed INTEGER DEFAULT 0;',
-                        [],
-                        () => { },
-                        () => { } // ignore error if column already exists
-                    );
-                    isDbInitialized = true;
-                    resolve();
-                },
-                (t, err) => {
-                    console.warn('FocusStorageService init warning:', err);
-                    isDbInitialized = true;
-                    resolve();
-                }
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    start_time INTEGER NOT NULL,
+                    duration_ms INTEGER NOT NULL,
+                    status TEXT NOT NULL,
+                    session_title TEXT,
+                    task_completed INTEGER DEFAULT 0
+                );`
             );
+            tx.executeSql('PRAGMA table_info(focus_sessions);', [], (transaction, result) => {
+                const columns = new Set();
+                for (let i = 0; i < result.rows.length; i += 1) {
+                    columns.add(result.rows.item(i).name);
+                }
+                if (!columns.has('session_title')) {
+                    transaction.executeSql('ALTER TABLE focus_sessions ADD COLUMN session_title TEXT;');
+                }
+                if (!columns.has('task_completed')) {
+                    transaction.executeSql('ALTER TABLE focus_sessions ADD COLUMN task_completed INTEGER DEFAULT 0;');
+                }
+            });
+        }, reject, () => {
+            // Report success after the transaction commits, never after a failed query.
+            isDbInitialized = true;
+            resolve();
         });
+    }).catch(error => {
+        initializationPromise = null;
+        throw error;
     });
+    return initializationPromise;
 };
 
 export const FocusStorageService = {

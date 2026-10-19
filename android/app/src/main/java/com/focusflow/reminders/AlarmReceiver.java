@@ -14,8 +14,13 @@ import android.os.Build;
 import android.util.Log;
 
 import androidx.core.app.NotificationCompat;
+import androidx.core.app.NotificationManagerCompat;
 
 import com.focusflow.MainActivity;
+
+import java.text.SimpleDateFormat;
+import java.util.Date;
+import java.util.Locale;
 
 public class AlarmReceiver extends BroadcastReceiver {
     private static final String TAG = "AlarmReceiver";
@@ -24,60 +29,103 @@ public class AlarmReceiver extends BroadcastReceiver {
 
     @Override
     public void onReceive(Context context, Intent intent) {
-        String eventId = intent.getStringExtra("EVENT_ID");
-        String eventTitle = intent.getStringExtra("EVENT_TITLE");
-        int mode = intent.getIntExtra("REMINDER_MODE", 1); // 1 = notification, 2 = alarm
+        if (intent == null) return;
 
-        Log.i(TAG, "Alarm triggered for event: " + eventTitle + " with mode " + mode);
+        String eventId = intent.getStringExtra("EVENT_ID");
+        if (eventId == null) eventId = "event_" + System.currentTimeMillis();
+
+        String eventTitle = intent.getStringExtra("EVENT_TITLE");
+        if (eventTitle == null || eventTitle.isEmpty()) {
+            eventTitle = "Scheduled Focus Session";
+        }
+
+        int mode = intent.getIntExtra("REMINDER_MODE", 1); // 1 = notification, 2 = alarm
+        long startTime = intent.getLongExtra("START_TIME", 0L);
+        long endTime = intent.getLongExtra("END_TIME", 0L);
+
+        int notificationId = Math.abs(eventId.hashCode());
+
+        Log.i(TAG, "Reminder triggered for event: " + eventTitle + " (" + eventId + ") mode=" + mode);
 
         createNotificationChannels(context);
 
-        NotificationManager notificationManager = (NotificationManager) context.getSystemService(Context.NOTIFICATION_SERVICE);
+        // Build human-readable time range (e.g. "09:00 – 09:30")
+        String timeRange = "";
+        if (startTime > 0 && endTime > 0) {
+            SimpleDateFormat sdf = new SimpleDateFormat("HH:mm", Locale.getDefault());
+            timeRange = sdf.format(new Date(startTime)) + " – " + sdf.format(new Date(endTime));
+        }
 
-        // Intent to open the app directly to the Focus timer
-        Intent appIntent = new Intent(context, MainActivity.class);
-        appIntent.setFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_CLEAR_TASK);
-        appIntent.putExtra("START_FOCUS_FROM_ALARM", true);
-        appIntent.putExtra("EVENT_ID", eventId);
-        
-        PendingIntent contentIntent = PendingIntent.getActivity(
-                context, 
-                eventId.hashCode(), 
-                appIntent, 
+        // 1. Play ringing alarm if mode is 2 (Alarm)
+        if (mode == 2) {
+            AlarmSoundPlayer.play(context);
+        }
+
+        // 2. Action: Continue -> Opens MainActivity with Focus screen parameters
+        Intent continueIntent = new Intent(context, MainActivity.class);
+        continueIntent.setFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_CLEAR_TOP | Intent.FLAG_ACTIVITY_SINGLE_TOP);
+        continueIntent.setAction(NotificationActionReceiver.ACTION_CONTINUE);
+        continueIntent.putExtra("START_FOCUS_FROM_ALARM", true);
+        continueIntent.putExtra("EVENT_ID", eventId);
+        continueIntent.putExtra("EVENT_TITLE", eventTitle);
+        continueIntent.putExtra("START_TIME", startTime);
+        continueIntent.putExtra("END_TIME", endTime);
+        continueIntent.putExtra("NOTIFICATION_ID", notificationId);
+
+        PendingIntent continuePendingIntent = PendingIntent.getActivity(
+                context,
+                notificationId * 31 + 1,
+                continueIntent,
+                PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE
+        );
+
+        // 3. Action: Reject -> Stops sound and dismisses notification without opening Focus
+        Intent rejectIntent = new Intent(context, NotificationActionReceiver.class);
+        rejectIntent.setAction(NotificationActionReceiver.ACTION_REJECT);
+        rejectIntent.putExtra("EVENT_ID", eventId);
+        rejectIntent.putExtra("NOTIFICATION_ID", notificationId);
+
+        PendingIntent rejectPendingIntent = PendingIntent.getBroadcast(
+                context,
+                notificationId * 31 + 2,
+                rejectIntent,
                 PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE
         );
 
         String channelId = (mode == 2) ? CHANNEL_ID_ALARM : CHANNEL_ID_NOTIF;
-        
         int iconRes = (context.getApplicationInfo().icon != 0) ? context.getApplicationInfo().icon : android.R.drawable.ic_lock_idle_alarm;
+
+        String contentText = (!timeRange.isEmpty()) ? timeRange : ((mode == 2) ? "Alarm: Session starting now!" : "Reminder: Session starting soon.");
 
         NotificationCompat.Builder builder = new NotificationCompat.Builder(context, channelId)
                 .setSmallIcon(iconRes)
-                .setContentTitle(eventTitle != null ? eventTitle : "Scheduled Focus Session")
-                .setContentText((mode == 2) ? "⏰ Alarm: Your focus session is starting now!" : "🔔 Reminder: Your focus session is coming up.")
+                .setContentTitle(eventTitle)
+                .setContentText(contentText)
                 .setPriority(NotificationCompat.PRIORITY_MAX)
                 .setCategory(NotificationCompat.CATEGORY_ALARM)
-                .setContentIntent(contentIntent)
+                .setContentIntent(continuePendingIntent)
+                .setDeleteIntent(rejectPendingIntent) // swiping notification away stops ringing
                 .setAutoCancel(true)
                 .setVibrate(new long[]{0, 500, 250, 500, 250, 500})
-                .addAction(android.R.drawable.ic_media_play, "Start Focus", contentIntent);
-
-        // Required to ensure the notification pops up heads-up instantly
-        builder.setDefaults(Notification.DEFAULT_VIBRATE);
+                .addAction(android.R.drawable.ic_media_play, "Continue", continuePendingIntent)
+                .addAction(android.R.drawable.ic_menu_close_clear_cancel, "Reject", rejectPendingIntent);
 
         if (mode == 2) {
-            // Sound is handled by the Notification Channel configuration on API 26+
             Uri alarmSound = RingtoneManager.getDefaultUri(RingtoneManager.TYPE_ALARM);
             if (alarmSound == null) {
                 alarmSound = RingtoneManager.getDefaultUri(RingtoneManager.TYPE_NOTIFICATION);
             }
-            // On older APIs (< 26), set sound directly
             builder.setSound(alarmSound);
-            builder.setFullScreenIntent(contentIntent, true);
+            builder.setFullScreenIntent(continuePendingIntent, true);
         }
 
-        if (notificationManager != null) {
-            notificationManager.notify(eventId.hashCode(), builder.build());
+        try {
+            NotificationManagerCompat.from(context).notify(notificationId, builder.build());
+            Log.i(TAG, "Notification posted with ID: " + notificationId);
+        } catch (SecurityException se) {
+            Log.e(TAG, "Notification permission missing to post reminder", se);
+        } catch (Exception e) {
+            Log.e(TAG, "Failed to post notification", e);
         }
     }
 
@@ -105,16 +153,15 @@ public class AlarmReceiver extends BroadcastReceiver {
                         NotificationManager.IMPORTANCE_HIGH
                 );
                 channel2.setDescription("Loud ringing alarms for scheduled events");
-                
+
                 Uri alarmSound = RingtoneManager.getDefaultUri(RingtoneManager.TYPE_ALARM);
                 AudioAttributes audioAttributes = new AudioAttributes.Builder()
                         .setContentType(AudioAttributes.CONTENT_TYPE_SONIFICATION)
                         .setUsage(AudioAttributes.USAGE_ALARM)
                         .build();
-                
+
                 channel2.setSound(alarmSound, audioAttributes);
-                // Allow bypassing DND if user enables it in settings
-                channel2.setBypassDnd(true); 
+                channel2.setBypassDnd(true);
                 manager.createNotificationChannel(channel2);
             }
         }

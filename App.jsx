@@ -1,25 +1,19 @@
 import React from 'react';
 import { SafeAreaProvider } from 'react-native-safe-area-context';
 import AppNavigator from './Src/Navigation/AppNavigator';
-
-import { Routes } from './Src/Constants/Routes';
-import { navigate, navigationRef } from './Src/Navigation/NavigationRef';
+import { useStartup } from './Src/Hooks/useStartup';
 
 function App(props) {
-  React.useEffect(() => {
-    // If Android Alarm Notification started the app
-    if (props.startupStartFocus) {
-      // Wait for navigation container to mount
-      const unsubscribe = navigationRef.addListener('ready', () => {
-        navigate(Routes.FOCUS, { eventId: props.startupEventId });
-      });
-      return unsubscribe;
-    }
-  }, [props.startupStartFocus, props.startupEventId]);
+  const { startupState, startupError, retry, onNavigationReady } = useStartup(props);
 
   return (
     <SafeAreaProvider style={{ flex: 1 }}>
-      <AppNavigator />
+      <AppNavigator
+        startupState={startupState}
+        startupError={startupError}
+        onRetry={retry}
+        onNavigationReady={onNavigationReady}
+      />
     </SafeAreaProvider>
   );
 }

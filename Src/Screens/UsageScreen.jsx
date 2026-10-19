@@ -9,6 +9,7 @@ import {
   Platform,
   Alert,
   StatusBar,
+  Image,
 } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { NativeModules } from 'react-native';
@@ -17,6 +18,7 @@ import Svg, { Rect, Path, Line, Circle } from 'react-native-svg';
 import { Theme } from '../Theme/Theme';
 import { Routes } from '../Constants/Routes';
 import { TargetStorageService } from '../Services/TargetStorageService';
+import { UsageDataService } from '../Services/UsageDataService';
 
 const { NativeTracking } = NativeModules;
 
@@ -26,26 +28,20 @@ export default function UsageScreen() {
 
   const navigation = useNavigation();
   const [usageStats, setUsageStats] = useState({});
+  const [appMetadata, setAppMetadata] = useState({});
   const [loading, setLoading] = useState(false);
-  const [selectedFilter, setSelectedFilter] = useState('Today'); // 'Today' | '7 Days'
+  const [selectedFilter, setSelectedFilter] = useState('Today'); // 'Today' | 'Week'
   const [sortBy, setSortBy] = useState('By time'); // 'By time' | 'A-Z'
   const [dailyTargetMin, setDailyTargetMin] = useState(240); // 4 hours in minutes
   const [hourlyRaw, setHourlyRaw] = useState(new Array(24).fill(0));
   const [unlocksCount, setUnlocksCount] = useState(0);
   const [notificationsCount, setNotificationsCount] = useState(0);
   const [hasPermission, setHasPermission] = useState(false);
+  const [hasNotificationPermission, setHasNotificationPermission] = useState(false);
 
-  // Compute timestamp ranges based on selectedFilter
+  // Compute timestamp ranges based on selectedFilter ('Today' vs 'Week')
   const dateRange = useMemo(() => {
-    const now = new Date();
-    if (selectedFilter === 'Today') {
-      const startOfDay = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
-      const endOfDay = startOfDay + 86400000;
-      return { startMs: startOfDay, endMs: endOfDay };
-    } else {
-      const startOf7Days = Date.now() - 7 * 86400000;
-      return { startMs: startOf7Days, endMs: Date.now() };
-    }
+    return UsageDataService.getDateRange(selectedFilter);
   }, [selectedFilter]);
 
   const loadData = useCallback(async () => {
@@ -58,19 +54,27 @@ export default function UsageScreen() {
         const access = await NativeTracking.hasUsageAccess();
         setHasPermission(access);
 
+        let notifAccess = false;
+        if (NativeTracking.hasNotificationAccess) {
+          notifAccess = await NativeTracking.hasNotificationAccess();
+        }
+        setHasNotificationPermission(notifAccess);
+
         if (access) {
           // 2. Load usage stats for date range
-          if (NativeTracking.getUsageRange) {
-            const stats = await NativeTracking.getUsageRange(dateRange.startMs, dateRange.endMs);
-            setUsageStats(stats || {});
-          } else {
-            const stats = await NativeTracking.getDailyForegroundUsage();
-            setUsageStats(stats || {});
+          const stats = await NativeTracking.getUsageRange(dateRange.startMs, dateRange.queryEndMs);
+          setUsageStats(stats || {});
+
+          // Resolve app names and icons for all active apps
+          const pkgs = Object.keys(stats || {});
+          if (pkgs.length > 0) {
+            const meta = await UsageDataService.resolveAppsMetadata(pkgs);
+            setAppMetadata(meta || {});
           }
 
           // 3. Load unlocks for date range
           if (NativeTracking.getUnlockCountRange) {
-            const count = await NativeTracking.getUnlockCountRange(dateRange.startMs, dateRange.endMs);
+            const count = await NativeTracking.getUnlockCountRange(dateRange.startMs, dateRange.queryEndMs);
             setUnlocksCount(count || 0);
           }
 
@@ -84,6 +88,14 @@ export default function UsageScreen() {
         } else {
           setUsageStats({});
           setUnlocksCount(0);
+        }
+
+        // 5. Load notifications for date range
+        if ((notifAccess || access) && NativeTracking.getNotificationCountRange) {
+          const n = await NativeTracking.getNotificationCountRange(dateRange.startMs, dateRange.queryEndMs);
+          setNotificationsCount(n || 0);
+        } else {
+          setNotificationsCount(0);
         }
       }
     } catch (e) {
@@ -243,7 +255,7 @@ export default function UsageScreen() {
         </TouchableOpacity>
       </View>
 
-      {/* Segmented Filter (Today / 7 Days) */}
+      {/* Segmented Filter (Today / Week) */}
       <View style={styles.segmentedContainer}>
         <TouchableOpacity
           onPress={() => setSelectedFilter('Today')}
@@ -253,11 +265,11 @@ export default function UsageScreen() {
           <Text style={[styles.segmentText, selectedFilter === 'Today' && styles.segmentTextActive]}>Today</Text>
         </TouchableOpacity>
         <TouchableOpacity
-          onPress={() => setSelectedFilter('7 Days')}
-          style={[styles.segmentBtn, selectedFilter === '7 Days' && styles.segmentBtnActive]}
+          onPress={() => setSelectedFilter('Week')}
+          style={[styles.segmentBtn, selectedFilter === 'Week' && styles.segmentBtnActive]}
           activeOpacity={0.8}
         >
-          <Text style={[styles.segmentText, selectedFilter === '7 Days' && styles.segmentTextActive]}>7 Days</Text>
+          <Text style={[styles.segmentText, selectedFilter === 'Week' && styles.segmentTextActive]}>Week</Text>
         </TouchableOpacity>
       </View>
 
@@ -316,8 +328,12 @@ export default function UsageScreen() {
               <Path d="M13.73 21A2 2 0 0 1 10.27 21" stroke="#5056D8" strokeWidth={2} />
             </Svg>
           </View>
-          <Text style={styles.statValue}>{notificationsCount}</Text>
-          <Text style={styles.statLabel}>Notifications</Text>
+          <Text style={styles.statValue}>
+            {(hasNotificationPermission || hasPermission) ? notificationsCount : '—'}
+          </Text>
+          <Text style={styles.statLabel}>
+            {(hasNotificationPermission || hasPermission) ? 'Notifications' : 'Grant Notifs'}
+          </Text>
         </View>
       </View>
 
@@ -332,22 +348,33 @@ export default function UsageScreen() {
       <View style={styles.appsListCard}>
         {appList.length > 0 ? (
           appList.map((app, index) => {
-            const minutesUsed = Math.max(1, Math.round(app.durationMs / 60000));
-            const progress = Math.min(100, Math.round((minutesUsed / 60) * 100));
-            const displayName = app.packageName.split('.').pop() || app.packageName;
+            const hrs = Math.floor(app.durationMs / 3600000);
+            const mins = Math.floor((app.durationMs % 3600000) / 60000);
+            const durationLabel = hrs > 0 ? `${hrs}h ${mins}m` : `${Math.max(1, mins)}m`;
+
+            const maxDuration = appList[0]?.durationMs || 1;
+            const relativePercent = Math.min(100, Math.max(8, Math.round((app.durationMs / maxDuration) * 100)));
+
+            const meta = appMetadata[app.packageName];
+            const displayName = meta?.appName || app.packageName.split('.').pop() || app.packageName;
+            const iconUri = meta?.iconUri;
 
             return (
               <View key={app.packageName} style={[styles.appItemRow, index < appList.length - 1 && styles.appItemBorder]}>
-                <View style={styles.appIconBadge}>
-                  <Text style={styles.appIconLetter}>{displayName.charAt(0).toUpperCase()}</Text>
-                </View>
+                {iconUri ? (
+                  <Image source={{ uri: iconUri }} style={styles.appRealIcon} />
+                ) : (
+                  <View style={styles.appIconBadge}>
+                    <Text style={styles.appIconLetter}>{displayName.charAt(0).toUpperCase()}</Text>
+                  </View>
+                )}
                 <View style={styles.appItemContent}>
                   <View style={styles.appItemTop}>
-                    <Text style={styles.appItemName}>{displayName}</Text>
-                    <Text style={styles.appItemDuration}>{minutesUsed}m</Text>
+                    <Text style={styles.appItemName} numberOfLines={1}>{displayName}</Text>
+                    <Text style={styles.appItemDuration}>{durationLabel}</Text>
                   </View>
                   <View style={styles.appItemProgressTrack}>
-                    <View style={[styles.appItemProgressFill, { width: `${progress}%` }]} />
+                    <View style={[styles.appItemProgressFill, { width: `${relativePercent}%` }]} />
                   </View>
                 </View>
               </View>
@@ -606,6 +633,13 @@ const styles = StyleSheet.create({
   appItemBorder: {
     borderBottomWidth: 1,
     borderBottomColor: '#F0F2FA',
+  },
+  appRealIcon: {
+    width: 38,
+    height: 38,
+    borderRadius: 10,
+    marginRight: 14,
+    backgroundColor: '#F0F2FF',
   },
   appIconBadge: {
     width: 38,

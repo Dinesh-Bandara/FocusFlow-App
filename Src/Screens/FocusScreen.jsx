@@ -3,11 +3,14 @@ import {
   View,
   Text,
   StyleSheet,
+  ScrollView,
   TouchableOpacity,
   Modal,
   Platform,
   Alert,
   StatusBar,
+  TextInput,
+  Image,
 } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import Svg, { Circle, Rect, Line, Path } from 'react-native-svg';
@@ -15,10 +18,11 @@ import { useRoute, useNavigation } from '@react-navigation/native';
 import { Routes } from '../Constants/Routes';
 import { useFocusSession } from '../Hooks/useFocusSession';
 import { FocusStorageService } from '../Services/FocusStorageService';
+import { TargetStorageService } from '../Services/TargetStorageService';
 
 export default function FocusScreen() {
   const insets = useSafeAreaInsets();
-  const topPadding = Math.max(insets.top, Platform.OS === 'android' ? (StatusBar.currentHeight || 0) : 0) + 12;
+  const topPadding = Math.max(insets.top, Platform.OS === 'android' ? (StatusBar.currentHeight || 0) : 0) + 10;
 
   const route = useRoute();
   const navigation = useNavigation();
@@ -31,13 +35,14 @@ export default function FocusScreen() {
     sessionTitle,
     secondsLeft,
     totalSeconds,
-    elapsedSeconds,
+    recordedFocusSeconds,
+    plannedMinutes,
     progressFraction,
     showSummary,
     setShowSummary,
     unlocksCount,
     distractingMin,
-    initialDurationMin,
+    distractingBreakdown,
     initialStartTime,
     initialEndTime,
     startSession,
@@ -46,22 +51,31 @@ export default function FocusScreen() {
     togglePlayPause,
     endSessionEarly,
     recordOutcome,
+    refreshMetrics,
   } = useFocusSession(route.params);
 
   // Up next event from SQLite
   const [upNextEvent, setUpNextEvent] = useState(null);
 
+  // Distracting Apps Config Modal
+  const [showConfigModal, setShowConfigModal] = useState(false);
+  const [distractingList, setDistractingList] = useState([]);
+  const [newPackageInput, setNewPackageInput] = useState('');
+
   useEffect(() => {
     let isMounted = true;
-    async function loadUpNext() {
+    async function loadData() {
       try {
         const next = await FocusStorageService.getNextUpcomingEvent();
         if (isMounted) setUpNextEvent(next);
+
+        const apps = await TargetStorageService.getDistractingApps();
+        if (isMounted) setDistractingList(apps);
       } catch (e) {
-        console.warn('Error fetching up next event:', e);
+        console.warn('Error fetching focus screen data:', e);
       }
     }
-    loadUpNext();
+    loadData();
     return () => {
       isMounted = false;
     };
@@ -82,10 +96,39 @@ export default function FocusScreen() {
     );
   };
 
+  const handleToggleDistractingPackage = async (pkg) => {
+    let updated;
+    if (distractingList.includes(pkg)) {
+      updated = distractingList.filter(p => p !== pkg);
+    } else {
+      updated = [...distractingList, pkg];
+    }
+    setDistractingList(updated);
+    await TargetStorageService.setDistractingApps(updated);
+    refreshMetrics();
+  };
+
+  const handleAddCustomPackage = async () => {
+    const trimmed = newPackageInput.trim();
+    if (!trimmed) return;
+    if (!distractingList.includes(trimmed)) {
+      const updated = [...distractingList, trimmed];
+      setDistractingList(updated);
+      await TargetStorageService.setDistractingApps(updated);
+      refreshMetrics();
+    }
+    setNewPackageInput('');
+  };
+
   // Time calculations
   const minutes = Math.floor(secondsLeft / 60);
   const seconds = secondsLeft % 60;
   const timeString = `${minutes < 10 ? '0' : ''}${minutes}:${seconds < 10 ? '0' : ''}${seconds}`;
+
+  // Recorded focus time in MM:SS
+  const recordedMin = Math.floor(recordedFocusSeconds / 60);
+  const recordedSec = recordedFocusSeconds % 60;
+  const recordedTimeString = `${recordedMin < 10 ? '0' : ''}${recordedMin}:${recordedSec < 10 ? '0' : ''}${recordedSec}`;
 
   // Circular ring geometry (radius 95, circumference ~596.9)
   const radius = 95;
@@ -97,28 +140,38 @@ export default function FocusScreen() {
     if (initialStartTime && initialEndTime) {
       const s = new Date(initialStartTime);
       const e = new Date(initialEndTime);
-      const formatHM = (d) =>
+      const formatHM = d =>
         `${d.getHours().toString().padStart(2, '0')}:${d.getMinutes().toString().padStart(2, '0')}`;
-      return `${formatHM(s)} – ${formatHM(e)}`;
+      return `${formatHM(s)} – ${formatHM(e)} (${plannedMinutes}m slot)`;
     }
-    return `${initialDurationMin} min target`;
-  }, [initialStartTime, initialEndTime, initialDurationMin]);
+    return `${plannedMinutes} min target`;
+  }, [initialStartTime, initialEndTime, plannedMinutes]);
+
+  // Format slot end time for helper note
+  const slotEndTimeFormatted = useMemo(() => {
+    if (initialEndTime) {
+      const e = new Date(initialEndTime);
+      return `${e.getHours().toString().padStart(2, '0')}:${e.getMinutes().toString().padStart(2, '0')}`;
+    }
+    return null;
+  }, [initialEndTime]);
 
   // Format up next event time
   const upNextTimeFormatted = useMemo(() => {
     if (!upNextEvent) return '';
     const s = new Date(upNextEvent.startTime);
     const e = new Date(upNextEvent.endTime);
-    const formatHM = (d) =>
+    const formatHM = d =>
       `${d.getHours().toString().padStart(2, '0')}:${d.getMinutes().toString().padStart(2, '0')}`;
     return `${formatHM(s)} – ${formatHM(e)}`;
   }, [upNextEvent]);
 
   return (
     <View style={[styles.container, { paddingTop: topPadding }]}>
-      <StatusBar barStyle="dark-content" backgroundColor="transparent" translucent={true} />
-      {/* Top Header */}
-      <View style={styles.headerRow}>
+      <StatusBar barStyle="dark-content" backgroundColor="#F7F8FF" translucent={true} />
+
+      {/* 1. STATIONARY FIXED HEADER */}
+      <View style={styles.fixedHeader}>
         <View>
           <Text style={styles.titleText}>Focus Session</Text>
           <Text style={styles.subtitleText}>Make time for what matters</Text>
@@ -127,7 +180,8 @@ export default function FocusScreen() {
           style={styles.moreButton}
           onPress={() => {
             Alert.alert('Session Options', 'Manage focus settings.', [
-              { text: 'Switch Session', onPress: () => navigation.navigate(Routes.SCHEDULE) },
+              { text: 'Configure Distracting Apps', onPress: () => setShowConfigModal(true) },
+              { text: 'Switch Session in Schedule', onPress: () => navigation.navigate(Routes.SCHEDULE) },
               { text: 'Close', style: 'cancel' },
             ]);
           }}
@@ -137,159 +191,217 @@ export default function FocusScreen() {
         </TouchableOpacity>
       </View>
 
-      {/* Centered Lavender Session Chip */}
-      <View style={styles.sessionChip}>
-        <Svg width={16} height={16} viewBox="0 0 24 24" fill="none">
-          <Rect x={3} y={5} width={18} height={16} rx={3} stroke="#5056D8" strokeWidth={2} />
-          <Line x1={3} y1={10} x2={21} y2={10} stroke="#5056D8" strokeWidth={2} />
-        </Svg>
-        <Text style={styles.sessionChipTitle} numberOfLines={1}>{sessionTitle}</Text>
-        <Text style={styles.sessionChipTime}>{formattedChipTime}</Text>
-      </View>
-
-      {/* Large Circular Timer Ring */}
-      <View style={styles.timerRingSection}>
-        <View style={styles.ringContainer}>
-          <Svg width={230} height={230} viewBox="0 0 230 230">
-            {/* Background Pale Track */}
-            <Circle
-              cx={115}
-              cy={115}
-              r={radius}
-              stroke="#ECEEF8"
-              strokeWidth={10}
-              fill="none"
-            />
-            {/* Active Indigo Ring */}
-            <Circle
-              cx={115}
-              cy={115}
-              r={radius}
-              stroke="#5056D8"
-              strokeWidth={10}
-              fill="none"
-              strokeDasharray={`${circumference}`}
-              strokeDashoffset={strokeDashoffset}
-              strokeLinecap="round"
-              transform="rotate(-90 115 115)"
-            />
+      {/* 2. SCROLLABLE BODY CONTENT */}
+      <ScrollView
+        style={styles.scrollArea}
+        contentContainerStyle={styles.scrollContent}
+        showsVerticalScrollIndicator={false}
+      >
+        {/* Centered Lavender Session Chip */}
+        <View style={styles.sessionChip}>
+          <Svg width={16} height={16} viewBox="0 0 24 24" fill="none">
+            <Rect x={3} y={5} width={18} height={16} rx={3} stroke="#5056D8" strokeWidth={2} />
+            <Line x1={3} y1={10} x2={21} y2={10} stroke="#5056D8" strokeWidth={2} />
           </Svg>
+          <Text style={styles.sessionChipTitle} numberOfLines={1}>
+            {sessionTitle}
+          </Text>
+          <Text style={styles.sessionChipTime}>{formattedChipTime}</Text>
+        </View>
 
-          {/* Centered Overlay */}
-          <View style={styles.ringCenterOverlay}>
-            <View style={styles.inProgressPill}>
-              <View
-                style={[
-                  styles.statusDot,
-                  {
-                    backgroundColor: isActive
-                      ? '#5056D8'
-                      : isPaused
-                        ? '#EAA128'
-                        : '#727A91',
-                  },
-                ]}
+        {/* Large Circular Timer Ring */}
+        <View style={styles.timerRingSection}>
+          <View style={styles.ringContainer}>
+            <Svg width={230} height={230} viewBox="0 0 230 230">
+              {/* Background Pale Track */}
+              <Circle
+                cx={115}
+                cy={115}
+                r={radius}
+                stroke="#ECEEF8"
+                strokeWidth={10}
+                fill="none"
               />
-              <Text style={styles.statusPillText}>
-                {isActive ? 'In progress' : isPaused ? 'Paused' : 'Ready'}
+              {/* Active Indigo Ring */}
+              <Circle
+                cx={115}
+                cy={115}
+                r={radius}
+                stroke="#5056D8"
+                strokeWidth={10}
+                fill="none"
+                strokeDasharray={`${circumference}`}
+                strokeDashoffset={strokeDashoffset}
+                strokeLinecap="round"
+                transform="rotate(-90 115 115)"
+              />
+            </Svg>
+
+            {/* Centered Overlay */}
+            <View style={styles.ringCenterOverlay}>
+              <View style={styles.inProgressPill}>
+                <View
+                  style={[
+                    styles.statusDot,
+                    {
+                      backgroundColor: isActive
+                        ? '#5056D8'
+                        : isPaused
+                          ? '#EAA128'
+                          : '#727A91',
+                    },
+                  ]}
+                />
+                <Text style={styles.statusPillText}>
+                  {isActive ? 'In progress' : isPaused ? 'Paused' : 'Ready'}
+                </Text>
+              </View>
+              <Text style={styles.timeValueText}>{timeString}</Text>
+              <Text style={styles.remainingLabel}>
+                {isIdle ? 'slot duration' : 'slot remaining'}
               </Text>
             </View>
-            <Text style={styles.timeValueText}>{timeString}</Text>
-            <Text style={styles.remainingLabel}>
-              {isIdle ? 'planned' : 'remaining'}
-            </Text>
           </View>
-        </View>
 
-        <Text style={styles.sessionLengthText}>{initialDurationMin} min session</Text>
-      </View>
-
-      {/* Action Controls */}
-      <View style={styles.controlsRow}>
-        {isIdle ? (
-          <TouchableOpacity
-            style={styles.startPillBtn}
-            onPress={startSession}
-            activeOpacity={0.85}
-          >
-            <Svg width={16} height={16} viewBox="0 0 24 24" fill="#FFFFFF">
-              <Path d="M5 3L19 12L5 21V3Z" />
-            </Svg>
-            <Text style={styles.startBtnText}>Start Focus</Text>
-          </TouchableOpacity>
-        ) : (
-          <>
-            <TouchableOpacity
-              style={styles.pausePillBtn}
-              onPress={togglePlayPause}
-              activeOpacity={0.85}
-            >
-              {isActive ? (
-                <View style={styles.pauseIconRow}>
-                  <View style={styles.pauseBar} />
-                  <View style={styles.pauseBar} />
-                </View>
-              ) : (
-                <Svg width={14} height={14} viewBox="0 0 24 24" fill="#FFFFFF">
-                  <Path d="M5 3L19 12L5 21V3Z" />
-                </Svg>
-              )}
-              <Text style={styles.pauseBtnText}>{isActive ? 'Pause' : 'Resume'}</Text>
-            </TouchableOpacity>
-
-            <TouchableOpacity
-              style={styles.endPillBtn}
-              onPress={endSessionEarly}
-              activeOpacity={0.8}
-            >
-              <View style={styles.stopSquare} />
-              <Text style={styles.endBtnText}>End session</Text>
-            </TouchableOpacity>
-          </>
-        )}
-      </View>
-
-      {/* "This session" Card */}
-      <View style={styles.thisSessionCard}>
-        <Text style={styles.thisSessionTitle}>This session</Text>
-        <View style={styles.sessionStatsColumns}>
-          <View style={styles.sessionStatCol}>
-            <Text style={styles.statLargeNum}>{unlocksCount}</Text>
-            <Text style={styles.statSubLabel}>Unlocks</Text>
-          </View>
-          <View style={styles.sessionDivider} />
-          <View style={styles.sessionStatCol}>
-            <Text style={styles.statLargeNum}>{distractingMin} min</Text>
-            <Text style={styles.statSubLabel}>Distracting apps</Text>
-          </View>
-        </View>
-      </View>
-
-      {/* "Up next" Card */}
-      <TouchableOpacity
-        style={styles.upNextCard}
-        onPress={() => navigation.navigate(Routes.SCHEDULE)}
-        activeOpacity={0.8}
-      >
-        <View style={styles.upNextLeft}>
-          <Text style={styles.upNextLabel}>Up next</Text>
-          {upNextEvent ? (
-            <View style={styles.upNextTitleRow}>
-              <Svg width={16} height={16} viewBox="0 0 24 24" fill="none">
-                <Rect x={3} y={5} width={18} height={16} rx={3} stroke="#5056D8" strokeWidth={2} />
-                <Line x1={3} y1={10} x2={21} y2={10} stroke="#5056D8" strokeWidth={2} />
-              </Svg>
-              <Text style={styles.upNextTitle} numberOfLines={1}>{upNextEvent.title}</Text>
-              <Text style={styles.upNextTime}>{upNextTimeFormatted}</Text>
+          {/* Sub-label describing recorded focus time vs calendar end boundary */}
+          {slotEndTimeFormatted ? (
+            <View style={styles.slotDetailsBox}>
+              <Text style={styles.slotDetailText}>
+                {isPaused
+                  ? `Paused • Slot ends at ${slotEndTimeFormatted}`
+                  : `Focus slot ends at ${slotEndTimeFormatted}`}
+              </Text>
+              <Text style={styles.recordedFocusText}>
+                Recorded focus: {recordedTimeString}
+              </Text>
             </View>
           ) : (
-            <Text style={styles.upNextEmpty}>No upcoming events scheduled</Text>
+            <Text style={styles.sessionLengthText}>{plannedMinutes} min session</Text>
           )}
         </View>
-        <Text style={styles.chevronNext}>›</Text>
-      </TouchableOpacity>
 
-      {/* Summary Modal with Exactly-Once Outcome Saving */}
+        {/* Action Controls */}
+        <View style={styles.controlsRow}>
+          {isIdle ? (
+            <TouchableOpacity
+              style={styles.startPillBtn}
+              onPress={startSession}
+              activeOpacity={0.85}
+            >
+              <Svg width={16} height={16} viewBox="0 0 24 24" fill="#FFFFFF">
+                <Path d="M5 3L19 12L5 21V3Z" />
+              </Svg>
+              <Text style={styles.startBtnText}>Start Focus</Text>
+            </TouchableOpacity>
+          ) : (
+            <>
+              <TouchableOpacity
+                style={styles.pausePillBtn}
+                onPress={togglePlayPause}
+                activeOpacity={0.85}
+              >
+                {isActive ? (
+                  <View style={styles.pauseIconRow}>
+                    <View style={styles.pauseBar} />
+                    <View style={styles.pauseBar} />
+                  </View>
+                ) : (
+                  <Svg width={14} height={14} viewBox="0 0 24 24" fill="#FFFFFF">
+                    <Path d="M5 3L19 12L5 21V3Z" />
+                  </Svg>
+                )}
+                <Text style={styles.pauseBtnText}>{isActive ? 'Pause' : 'Resume'}</Text>
+              </TouchableOpacity>
+
+              <TouchableOpacity
+                style={styles.endPillBtn}
+                onPress={handleEndSession}
+                activeOpacity={0.8}
+              >
+                <View style={styles.stopSquare} />
+                <Text style={styles.endBtnText}>End session</Text>
+              </TouchableOpacity>
+            </>
+          )}
+        </View>
+
+        {/* "This session" Card (Strictly Session-Specific Metrics) */}
+        <View style={styles.thisSessionCard}>
+          <View style={styles.thisSessionHeaderRow}>
+            <Text style={styles.thisSessionTitle}>This session metrics</Text>
+            <TouchableOpacity onPress={() => setShowConfigModal(true)} style={styles.configBtn} activeOpacity={0.7}>
+              <Text style={styles.configBtnText}>⚙ Choose apps</Text>
+            </TouchableOpacity>
+          </View>
+
+          <View style={styles.sessionStatsColumns}>
+            <View style={styles.sessionStatCol}>
+              <Text style={styles.statLargeNum}>{unlocksCount}</Text>
+              <Text style={styles.statSubLabel}>Controlled unlocks</Text>
+            </View>
+            <View style={styles.sessionDivider} />
+            <View style={styles.sessionStatCol}>
+              <Text style={styles.statLargeNum}>
+                {distractingMin > 0 ? `${distractingMin} min` : (distractingBreakdown.length > 0 ? '<1m' : '0 min')}
+              </Text>
+              <Text style={styles.statSubLabel}>Distracting apps</Text>
+            </View>
+          </View>
+
+          {/* Per-app breakdown during active focus intervals */}
+          {distractingBreakdown.length > 0 && (
+            <View style={styles.breakdownContainer}>
+              <Text style={styles.breakdownHeader}>Session Distractions:</Text>
+              {distractingBreakdown.map(item => (
+                <View key={item.packageName} style={styles.breakdownRow}>
+                  <View style={styles.breakdownLeft}>
+                    {item.icon ? (
+                      <Image
+                        source={{ uri: `data:image/png;base64,${item.icon}` }}
+                        style={styles.breakdownAppIcon}
+                      />
+                    ) : (
+                      <View style={styles.breakdownDot} />
+                    )}
+                    <Text style={styles.breakdownAppName} numberOfLines={1}>
+                      {item.appName}
+                    </Text>
+                  </View>
+                  <Text style={styles.breakdownAppDuration}>{item.formattedDuration}</Text>
+                </View>
+              ))}
+            </View>
+          )}
+        </View>
+
+        {/* "Up next" Card */}
+        <TouchableOpacity
+          style={styles.upNextCard}
+          onPress={() => navigation.navigate(Routes.SCHEDULE)}
+          activeOpacity={0.8}
+        >
+          <View style={styles.upNextLeft}>
+            <Text style={styles.upNextLabel}>Up next</Text>
+            {upNextEvent ? (
+              <View style={styles.upNextTitleRow}>
+                <Svg width={16} height={16} viewBox="0 0 24 24" fill="none">
+                  <Rect x={3} y={5} width={18} height={16} rx={3} stroke="#5056D8" strokeWidth={2} />
+                  <Line x1={3} y1={10} x2={21} y2={10} stroke="#5056D8" strokeWidth={2} />
+                </Svg>
+                <Text style={styles.upNextTitle} numberOfLines={1}>
+                  {upNextEvent.title}
+                </Text>
+                <Text style={styles.upNextTime}>{upNextTimeFormatted}</Text>
+              </View>
+            ) : (
+              <Text style={styles.upNextEmpty}>No upcoming events scheduled</Text>
+            )}
+          </View>
+          <Text style={styles.chevronNext}>›</Text>
+        </TouchableOpacity>
+      </ScrollView>
+
+      {/* 3. Summary Modal with Exactly-Once Outcome Saving */}
       <Modal visible={showSummary} animationType="fade" transparent={true}>
         <View style={styles.modalBackdrop}>
           <View style={styles.modalCard}>
@@ -297,29 +409,89 @@ export default function FocusScreen() {
               {status === 'ended_early' ? 'Session Concluded' : 'Session Complete!'}
             </Text>
             <Text style={styles.modalSubtitle}>
-              You focused for {Math.max(1, Math.floor(elapsedSeconds / 60))} minutes.
+              You focused for {Math.max(1, Math.round(recordedFocusSeconds / 60))} minutes on "{sessionTitle}".
             </Text>
-            <Text style={styles.modalQuestion}>Did you complete your planned task?</Text>
+
+            <View style={styles.summaryStatsRow}>
+              <View style={styles.summaryStatItem}>
+                <Text style={styles.summaryStatNum}>{unlocksCount}</Text>
+                <Text style={styles.summaryStatLabel}>Unlocks</Text>
+              </View>
+              <View style={styles.summaryStatItem}>
+                <Text style={styles.summaryStatNum}>
+                  {distractingMin > 0 ? `${distractingMin}m` : (distractingBreakdown.length > 0 ? '<1m' : '0m')}
+                </Text>
+                <Text style={styles.summaryStatLabel}>Distractions</Text>
+              </View>
+            </View>
+
+            <Text style={styles.modalQuestion}>Did you complete your goal?</Text>
             <View style={styles.modalButtonsRow}>
               <TouchableOpacity
-                style={styles.modalBtnYes}
-                onPress={() => {
-                  recordOutcome(true);
-                  navigation.navigate(Routes.REPORTS);
-                }}
+                style={styles.modalSecondaryBtn}
+                onPress={() => recordOutcome(false)}
+                activeOpacity={0.8}
               >
-                <Text style={styles.modalBtnTextYes}>Yes</Text>
+                <Text style={styles.modalSecondaryBtnText}>Not Yet</Text>
               </TouchableOpacity>
               <TouchableOpacity
-                style={styles.modalBtnNo}
-                onPress={() => {
-                  recordOutcome(false);
-                  navigation.navigate(Routes.REPORTS);
-                }}
+                style={styles.modalPrimaryBtn}
+                onPress={() => recordOutcome(true)}
+                activeOpacity={0.8}
               >
-                <Text style={styles.modalBtnTextNo}>No</Text>
+                <Text style={styles.modalPrimaryBtnText}>Yes, Completed!</Text>
               </TouchableOpacity>
             </View>
+          </View>
+        </View>
+      </Modal>
+
+      {/* 4. Distracting Apps Configuration Modal */}
+      <Modal visible={showConfigModal} animationType="slide" transparent={true}>
+        <View style={styles.modalBackdrop}>
+          <View style={styles.configModalCard}>
+            <Text style={styles.configModalTitle}>Distracting Apps</Text>
+            <Text style={styles.configModalSubtitle}>
+              Select which apps are tracked as distractions during active focus intervals.
+            </Text>
+
+            <ScrollView style={styles.configList} showsVerticalScrollIndicator={false}>
+              {distractingList.map(pkg => (
+                <View key={pkg} style={styles.configAppRow}>
+                  <Text style={styles.configAppPkg} numberOfLines={1}>
+                    {pkg.split('.').pop()?.toUpperCase()} ({pkg})
+                  </Text>
+                  <TouchableOpacity
+                    style={styles.removeAppBtn}
+                    onPress={() => handleToggleDistractingPackage(pkg)}
+                  >
+                    <Text style={styles.removeAppBtnText}>Remove</Text>
+                  </TouchableOpacity>
+                </View>
+              ))}
+            </ScrollView>
+
+            <View style={styles.addAppRow}>
+              <TextInput
+                style={styles.addAppInput}
+                placeholder="package.name (e.g. com.example)"
+                placeholderTextColor="#9CA3AF"
+                value={newPackageInput}
+                onChangeText={setNewPackageInput}
+                autoCapitalize="none"
+              />
+              <TouchableOpacity style={styles.addAppBtn} onPress={handleAddCustomPackage}>
+                <Text style={styles.addAppBtnText}>Add</Text>
+              </TouchableOpacity>
+            </View>
+
+            <TouchableOpacity
+              style={styles.closeConfigBtn}
+              onPress={() => setShowConfigModal(false)}
+              activeOpacity={0.8}
+            >
+              <Text style={styles.closeConfigBtnText}>Done</Text>
+            </TouchableOpacity>
           </View>
         </View>
       </Modal>
@@ -330,17 +502,15 @@ export default function FocusScreen() {
 const styles = StyleSheet.create({
   container: {
     flex: 1,
-    backgroundColor: '#F7F8FF', // Pale lavender canvas
-    paddingHorizontal: 20,
-    paddingTop: 16,
-    paddingBottom: 24,
-    justifyContent: 'space-between',
+    backgroundColor: '#F7F8FF',
   },
-  headerRow: {
+  fixedHeader: {
     flexDirection: 'row',
     justifyContent: 'space-between',
     alignItems: 'center',
-    marginBottom: 8,
+    paddingHorizontal: 20,
+    paddingBottom: 12,
+    backgroundColor: '#F7F8FF',
   },
   titleText: {
     fontSize: 26,
@@ -349,77 +519,71 @@ const styles = StyleSheet.create({
     letterSpacing: -0.5,
   },
   subtitleText: {
-    fontSize: 14,
+    fontSize: 13,
     color: '#727A91',
     marginTop: 2,
-    fontWeight: '500',
   },
   moreButton: {
     padding: 8,
     borderRadius: 20,
-    backgroundColor: '#FFFFFF',
-    borderWidth: 1,
-    borderColor: '#ECEEF5',
-    width: 36,
-    height: 36,
-    alignItems: 'center',
-    justifyContent: 'center',
   },
   moreButtonText: {
-    fontSize: 14,
-    color: '#20283A',
+    fontSize: 20,
+    color: '#727A91',
     fontWeight: '700',
-    marginTop: -4,
+  },
+  scrollArea: {
+    flex: 1,
+  },
+  scrollContent: {
+    paddingHorizontal: 20,
+    paddingTop: 8,
+    paddingBottom: 110, // Generous clearance above bottom navigation
   },
   sessionChip: {
     flexDirection: 'row',
     alignItems: 'center',
-    justifyContent: 'center',
-    backgroundColor: '#EEF1FF',
-    paddingVertical: 8,
-    paddingHorizontal: 16,
+    backgroundColor: '#ECEEF8',
     borderRadius: 20,
+    paddingHorizontal: 14,
+    paddingVertical: 8,
     alignSelf: 'center',
     gap: 8,
-    marginTop: 4,
-    marginBottom: 10,
     maxWidth: '90%',
+    marginBottom: 20,
   },
   sessionChipTitle: {
     fontSize: 13,
-    fontWeight: '700',
+    fontWeight: '600',
     color: '#20283A',
-    maxWidth: 160,
+    flexShrink: 1,
   },
   sessionChipTime: {
     fontSize: 12,
-    color: '#727A91',
-    fontWeight: '500',
+    color: '#5056D8',
+    fontWeight: '600',
   },
   timerRingSection: {
     alignItems: 'center',
-    justifyContent: 'center',
-    marginVertical: 10,
+    marginBottom: 24,
   },
   ringContainer: {
     width: 230,
     height: 230,
-    alignItems: 'center',
     justifyContent: 'center',
-    position: 'relative',
+    alignItems: 'center',
   },
   ringCenterOverlay: {
     position: 'absolute',
     alignItems: 'center',
-    justifyContent: 'center',
   },
   inProgressPill: {
     flexDirection: 'row',
     alignItems: 'center',
-    backgroundColor: '#F0F2FF',
+    backgroundColor: '#ECEEF8',
+    borderRadius: 12,
+    paddingHorizontal: 10,
     paddingVertical: 4,
-    paddingHorizontal: 12,
-    borderRadius: 14,
     gap: 6,
     marginBottom: 6,
   },
@@ -429,14 +593,15 @@ const styles = StyleSheet.create({
     borderRadius: 3,
   },
   statusPillText: {
-    fontSize: 12,
+    fontSize: 11,
+    color: '#20283A',
     fontWeight: '600',
-    color: '#5056D8',
   },
   timeValueText: {
-    fontSize: 48,
-    fontWeight: '800',
+    fontSize: 42,
+    fontWeight: '700',
     color: '#20283A',
+    fontVariant: ['tabular-nums'],
     letterSpacing: -1,
   },
   remainingLabel: {
@@ -445,101 +610,121 @@ const styles = StyleSheet.create({
     fontWeight: '500',
     marginTop: -2,
   },
+  slotDetailsBox: {
+    alignItems: 'center',
+    marginTop: 10,
+  },
+  slotDetailText: {
+    fontSize: 13,
+    color: '#5056D8',
+    fontWeight: '600',
+  },
+  recordedFocusText: {
+    fontSize: 12,
+    color: '#727A91',
+    marginTop: 2,
+  },
   sessionLengthText: {
     fontSize: 13,
     color: '#727A91',
     fontWeight: '500',
-    marginTop: 12,
+    marginTop: 10,
   },
   controlsRow: {
     flexDirection: 'row',
+    justifyContent: 'center',
     gap: 12,
-    marginVertical: 10,
+    marginBottom: 24,
   },
   startPillBtn: {
-    flex: 1,
     flexDirection: 'row',
     alignItems: 'center',
-    justifyContent: 'center',
     backgroundColor: '#5056D8',
-    paddingVertical: 14,
     borderRadius: 24,
+    paddingVertical: 14,
+    paddingHorizontal: 36,
     gap: 10,
-    ...Platform.select({
-      android: { elevation: 3 },
-      ios: { shadowColor: '#5056D8', shadowOpacity: 0.3, shadowRadius: 6, shadowOffset: { width: 0, height: 3 } },
-    }),
   },
   startBtnText: {
-    fontSize: 16,
+    fontSize: 15,
     fontWeight: '700',
     color: '#FFFFFF',
   },
   pausePillBtn: {
-    flex: 1,
     flexDirection: 'row',
     alignItems: 'center',
-    justifyContent: 'center',
     backgroundColor: '#5056D8',
-    paddingVertical: 14,
     borderRadius: 24,
+    paddingVertical: 12,
+    paddingHorizontal: 28,
     gap: 8,
-    ...Platform.select({
-      android: { elevation: 2 },
-      ios: { shadowColor: '#5056D8', shadowOpacity: 0.25, shadowRadius: 6, shadowOffset: { width: 0, height: 3 } },
-    }),
   },
   pauseIconRow: {
     flexDirection: 'row',
     gap: 3,
   },
   pauseBar: {
-    width: 3.5,
+    width: 3,
     height: 12,
     backgroundColor: '#FFFFFF',
-    borderRadius: 1.5,
+    borderRadius: 1,
   },
   pauseBtnText: {
-    fontSize: 15,
+    fontSize: 14,
     fontWeight: '700',
     color: '#FFFFFF',
   },
   endPillBtn: {
-    flex: 1,
     flexDirection: 'row',
     alignItems: 'center',
-    justifyContent: 'center',
     backgroundColor: '#FFFFFF',
-    borderWidth: 1.5,
-    borderColor: '#5056D8',
-    paddingVertical: 14,
     borderRadius: 24,
+    paddingVertical: 12,
+    paddingHorizontal: 22,
     gap: 8,
+    borderWidth: 1,
+    borderColor: '#ECEEF5',
   },
   stopSquare: {
     width: 10,
     height: 10,
-    backgroundColor: '#5056D8',
+    backgroundColor: '#EF4444',
     borderRadius: 2,
   },
   endBtnText: {
-    fontSize: 15,
-    fontWeight: '700',
-    color: '#5056D8',
-  },
-  thisSessionCard: {
-    backgroundColor: '#FFFFFF',
-    borderRadius: 24,
-    padding: 16,
-    borderWidth: 1,
-    borderColor: '#ECEEF5',
-    marginVertical: 6,
-  },
-  thisSessionTitle: {
     fontSize: 14,
     fontWeight: '600',
     color: '#20283A',
-    marginBottom: 10,
+  },
+  thisSessionCard: {
+    backgroundColor: '#FFFFFF',
+    borderRadius: 20,
+    padding: 16,
+    marginBottom: 16,
+    borderWidth: 1,
+    borderColor: '#ECEEF5',
+  },
+  thisSessionHeaderRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginBottom: 14,
+  },
+  thisSessionTitle: {
+    fontSize: 15,
+    fontWeight: '700',
+    color: '#20283A',
+  },
+  configBtn: {
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+    borderRadius: 8,
+    backgroundColor: '#EEF1FF',
+  },
+  configBtnText: {
+    fontSize: 11,
+    color: '#5056D8',
+    fontWeight: '600',
   },
   sessionStatsColumns: {
     flexDirection: 'row',
@@ -555,44 +740,96 @@ const styles = StyleSheet.create({
     backgroundColor: '#ECEEF5',
   },
   statLargeNum: {
-    fontSize: 20,
-    fontWeight: '800',
+    fontSize: 22,
+    fontWeight: '700',
     color: '#20283A',
+    marginBottom: 2,
   },
   statSubLabel: {
     fontSize: 12,
     color: '#727A91',
     fontWeight: '500',
-    marginTop: 2,
   },
-  upNextCard: {
+  breakdownContainer: {
+    marginTop: 14,
+    paddingTop: 12,
+    borderTopWidth: 1,
+    borderTopColor: '#F1F3F9',
+  },
+  breakdownHeader: {
+    fontSize: 11,
+    fontWeight: '700',
+    color: '#727A91',
+    textTransform: 'uppercase',
+    letterSpacing: 0.5,
+    marginBottom: 8,
+  },
+  breakdownRow: {
     flexDirection: 'row',
     justifyContent: 'space-between',
     alignItems: 'center',
-    backgroundColor: '#EEF1FF',
+    paddingVertical: 4,
+  },
+  breakdownLeft: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    flex: 1,
+  },
+  breakdownAppIcon: {
+    width: 18,
+    height: 18,
+    borderRadius: 4,
+  },
+  breakdownDot: {
+    width: 8,
+    height: 8,
+    borderRadius: 4,
+    backgroundColor: '#EF4444',
+  },
+  breakdownAppName: {
+    fontSize: 12,
+    fontWeight: '600',
+    color: '#20283A',
+    flexShrink: 1,
+  },
+  breakdownAppDuration: {
+    fontSize: 12,
+    fontWeight: '700',
+    color: '#DC2626',
+  },
+  upNextCard: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    backgroundColor: '#FFFFFF',
     borderRadius: 20,
-    padding: 14,
-    marginTop: 4,
+    padding: 16,
+    borderWidth: 1,
+    borderColor: '#ECEEF5',
   },
   upNextLeft: {
     flex: 1,
+    marginRight: 10,
   },
   upNextLabel: {
     fontSize: 11,
+    fontWeight: '700',
     color: '#727A91',
-    fontWeight: '500',
-    marginBottom: 2,
+    textTransform: 'uppercase',
+    letterSpacing: 0.5,
+    marginBottom: 6,
   },
   upNextTitleRow: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 6,
+    gap: 8,
   },
   upNextTitle: {
     fontSize: 14,
-    fontWeight: '700',
+    fontWeight: '600',
     color: '#20283A',
-    maxWidth: 160,
+    flexShrink: 1,
   },
   upNextTime: {
     fontSize: 12,
@@ -602,17 +839,16 @@ const styles = StyleSheet.create({
   upNextEmpty: {
     fontSize: 13,
     color: '#727A91',
-    fontWeight: '500',
     fontStyle: 'italic',
   },
   chevronNext: {
-    fontSize: 18,
+    fontSize: 20,
     color: '#727A91',
     fontWeight: '600',
   },
   modalBackdrop: {
     flex: 1,
-    backgroundColor: 'rgba(26, 32, 53, 0.5)',
+    backgroundColor: 'rgba(32, 40, 58, 0.6)',
     justifyContent: 'center',
     alignItems: 'center',
     padding: 24,
@@ -622,7 +858,6 @@ const styles = StyleSheet.create({
     borderRadius: 24,
     padding: 24,
     width: '100%',
-    maxWidth: 340,
     alignItems: 'center',
   },
   modalTitle: {
@@ -634,41 +869,150 @@ const styles = StyleSheet.create({
   modalSubtitle: {
     fontSize: 14,
     color: '#727A91',
+    textAlign: 'center',
     marginBottom: 16,
+    lineHeight: 20,
+  },
+  summaryStatsRow: {
+    flexDirection: 'row',
+    backgroundColor: '#F7F8FF',
+    borderRadius: 16,
+    padding: 14,
+    width: '100%',
+    justifyContent: 'space-around',
+    marginBottom: 20,
+  },
+  summaryStatItem: {
+    alignItems: 'center',
+  },
+  summaryStatNum: {
+    fontSize: 18,
+    fontWeight: '700',
+    color: '#5056D8',
+  },
+  summaryStatLabel: {
+    fontSize: 11,
+    color: '#727A91',
+    marginTop: 2,
   },
   modalQuestion: {
-    fontSize: 15,
+    fontSize: 14,
     fontWeight: '600',
     color: '#20283A',
-    marginBottom: 20,
-    textAlign: 'center',
+    marginBottom: 14,
   },
   modalButtonsRow: {
     flexDirection: 'row',
     gap: 12,
     width: '100%',
   },
-  modalBtnYes: {
+  modalSecondaryBtn: {
     flex: 1,
-    backgroundColor: '#5056D8',
     paddingVertical: 12,
-    borderRadius: 18,
+    borderRadius: 16,
+    backgroundColor: '#ECEEF8',
     alignItems: 'center',
   },
-  modalBtnTextYes: {
-    color: '#FFFFFF',
+  modalSecondaryBtnText: {
+    fontSize: 14,
+    fontWeight: '600',
+    color: '#20283A',
+  },
+  modalPrimaryBtn: {
+    flex: 1,
+    paddingVertical: 12,
+    borderRadius: 16,
+    backgroundColor: '#5056D8',
+    alignItems: 'center',
+  },
+  modalPrimaryBtnText: {
     fontSize: 14,
     fontWeight: '700',
+    color: '#FFFFFF',
   },
-  modalBtnNo: {
+  configModalCard: {
+    backgroundColor: '#FFFFFF',
+    borderRadius: 24,
+    padding: 20,
+    width: '100%',
+    maxHeight: '80%',
+  },
+  configModalTitle: {
+    fontSize: 18,
+    fontWeight: '700',
+    color: '#20283A',
+    marginBottom: 4,
+  },
+  configModalSubtitle: {
+    fontSize: 12,
+    color: '#727A91',
+    marginBottom: 14,
+  },
+  configList: {
+    maxHeight: 250,
+    marginBottom: 14,
+  },
+  configAppRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    paddingVertical: 8,
+    borderBottomWidth: 1,
+    borderBottomColor: '#F1F3F9',
+  },
+  configAppPkg: {
+    fontSize: 12,
+    fontWeight: '600',
+    color: '#20283A',
     flex: 1,
-    backgroundColor: '#F0F2FA',
+    marginRight: 8,
+  },
+  removeAppBtn: {
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+    backgroundColor: '#FEE2E2',
+    borderRadius: 8,
+  },
+  removeAppBtnText: {
+    color: '#B91C1C',
+    fontSize: 11,
+    fontWeight: '600',
+  },
+  addAppRow: {
+    flexDirection: 'row',
+    gap: 8,
+    marginBottom: 16,
+  },
+  addAppInput: {
+    flex: 1,
+    backgroundColor: '#F7F8FF',
+    borderRadius: 12,
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    fontSize: 12,
+    color: '#20283A',
+    borderWidth: 1,
+    borderColor: '#ECEEF5',
+  },
+  addAppBtn: {
+    backgroundColor: '#5056D8',
+    paddingHorizontal: 16,
+    borderRadius: 12,
+    justifyContent: 'center',
+  },
+  addAppBtnText: {
+    color: '#FFFFFF',
+    fontSize: 12,
+    fontWeight: '700',
+  },
+  closeConfigBtn: {
+    backgroundColor: '#5056D8',
     paddingVertical: 12,
-    borderRadius: 18,
+    borderRadius: 16,
     alignItems: 'center',
   },
-  modalBtnTextNo: {
-    color: '#727A91',
+  closeConfigBtnText: {
+    color: '#FFFFFF',
     fontSize: 14,
     fontWeight: '700',
   },

@@ -29,7 +29,7 @@ public class ReminderModule extends ReactContextBaseJavaModule {
     }
 
     @ReactMethod
-    public void scheduleAlarm(String eventId, String title, double triggerTimeMs, int mode, Promise promise) {
+    public void scheduleAlarm(String eventId, String title, double triggerTimeMs, int mode, double startTimeMs, double endTimeMs, Promise promise) {
         try {
             Context context = getReactApplicationContext();
             AlarmManager alarmManager = (AlarmManager) context.getSystemService(Context.ALARM_SERVICE);
@@ -43,9 +43,10 @@ public class ReminderModule extends ReactContextBaseJavaModule {
             intent.putExtra("EVENT_ID", eventId);
             intent.putExtra("EVENT_TITLE", title);
             intent.putExtra("REMINDER_MODE", mode);
+            intent.putExtra("START_TIME", (long) startTimeMs);
+            intent.putExtra("END_TIME", (long) endTimeMs);
 
-            // Generate an integer request code based on the event string ID hash
-            int requestCode = eventId.hashCode();
+            int requestCode = Math.abs(eventId.hashCode());
 
             PendingIntent pendingIntent = PendingIntent.getBroadcast(
                     context,
@@ -81,18 +82,23 @@ public class ReminderModule extends ReactContextBaseJavaModule {
             Context context = getReactApplicationContext();
             AlarmManager alarmManager = (AlarmManager) context.getSystemService(Context.ALARM_SERVICE);
 
-            long triggerTimeMs = System.currentTimeMillis() + 5000L; // 5 seconds from now
-            String testId = "test_reminder_" + System.currentTimeMillis();
+            long now = System.currentTimeMillis();
+            long triggerTimeMs = now + 5000L; // 5 seconds from now
+            String testId = "test_reminder_" + now;
             String title = (mode == 2) ? "⏰ Test Focus Alarm" : "🔔 Test Focus Reminder";
 
             Intent intent = new Intent(context, AlarmReceiver.class);
             intent.putExtra("EVENT_ID", testId);
             intent.putExtra("EVENT_TITLE", title);
             intent.putExtra("REMINDER_MODE", mode);
+            intent.putExtra("START_TIME", now);
+            intent.putExtra("END_TIME", now + 25 * 60 * 1000L); // 25 min test window
+
+            int requestCode = Math.abs(testId.hashCode());
 
             PendingIntent pendingIntent = PendingIntent.getBroadcast(
                     context,
-                    testId.hashCode(),
+                    requestCode,
                     intent,
                     PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE
             );
@@ -141,7 +147,7 @@ public class ReminderModule extends ReactContextBaseJavaModule {
             AlarmManager alarmManager = (AlarmManager) context.getSystemService(Context.ALARM_SERVICE);
 
             Intent intent = new Intent(context, AlarmReceiver.class);
-            int requestCode = eventId.hashCode();
+            int requestCode = Math.abs(eventId.hashCode());
 
             PendingIntent pendingIntent = PendingIntent.getBroadcast(
                     context,
