@@ -51,11 +51,17 @@ public class SplashModule extends ReactContextBaseJavaModule {
         if (intent == null) return;
         boolean isFocus = intent.getBooleanExtra("START_FOCUS_FROM_ALARM", false);
         String eventId = intent.getStringExtra("EVENT_ID");
+        String eventTitle = intent.getStringExtra("EVENT_TITLE");
+        long startTime = intent.getLongExtra("START_TIME", 0L);
+        long endTime = intent.getLongExtra("END_TIME", 0L);
         Log.i(TAG, "processIntent: isFocus=" + isFocus + ", eventId=" + eventId);
         if (isFocus) {
             WritableMap map = Arguments.createMap();
             map.putString("action", "START_FOCUS");
             map.putString("eventId", eventId != null ? eventId : "");
+            if (eventTitle != null) map.putString("eventTitle", eventTitle);
+            if (startTime > 0) map.putDouble("startTime", (double) startTime);
+            if (endTime > 0) map.putDouble("endTime", (double) endTime);
             sPendingAction = map;
         }
     }
@@ -64,11 +70,17 @@ public class SplashModule extends ReactContextBaseJavaModule {
         if (intent == null) return;
         boolean isFocus = intent.getBooleanExtra("START_FOCUS_FROM_ALARM", false);
         String eventId = intent.getStringExtra("EVENT_ID");
+        String eventTitle = intent.getStringExtra("EVENT_TITLE");
+        long startTime = intent.getLongExtra("START_TIME", 0L);
+        long endTime = intent.getLongExtra("END_TIME", 0L);
         Log.i(TAG, "onNewIntent: isFocus=" + isFocus + ", eventId=" + eventId);
         if (isFocus) {
             WritableMap map = Arguments.createMap();
             map.putString("action", "START_FOCUS");
             map.putString("eventId", eventId != null ? eventId : "");
+            if (eventTitle != null) map.putString("eventTitle", eventTitle);
+            if (startTime > 0) map.putDouble("startTime", (double) startTime);
+            if (endTime > 0) map.putDouble("endTime", (double) endTime);
             sPendingAction = map;
 
             // If react context is active, emit event to JS immediately

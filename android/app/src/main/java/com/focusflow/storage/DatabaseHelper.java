@@ -22,6 +22,8 @@ public class DatabaseHelper extends SQLiteOpenHelper {
     @Override
     public void onCreate(SQLiteDatabase db) {
         db.execSQL(DatabaseSchema.UsageRecords.CREATE_TABLE);
+        db.execSQL(DatabaseSchema.NotificationRecords.CREATE_TABLE);
+        db.execSQL(DatabaseSchema.NotificationRecords.CREATE_INDEX);
         db.execSQL(DatabaseSchema.NotificationCounts.CREATE_TABLE);
         db.execSQL(DatabaseSchema.UnlockRecords.CREATE_TABLE);
         db.execSQL(DatabaseSchema.FocusSessions.CREATE_TABLE);
@@ -39,6 +41,12 @@ public class DatabaseHelper extends SQLiteOpenHelper {
             } catch (Exception ignored) {}
             try {
                 db.execSQL("ALTER TABLE " + DatabaseSchema.FocusSessions.TABLE_NAME + " ADD COLUMN " + DatabaseSchema.FocusSessions.COL_TASK_COMPLETED + " INTEGER NOT NULL DEFAULT 0;");
+            } catch (Exception ignored) {}
+        }
+        if (oldVersion < 4) {
+            try {
+                db.execSQL(DatabaseSchema.NotificationRecords.CREATE_TABLE);
+                db.execSQL(DatabaseSchema.NotificationRecords.CREATE_INDEX);
             } catch (Exception ignored) {}
         }
     }

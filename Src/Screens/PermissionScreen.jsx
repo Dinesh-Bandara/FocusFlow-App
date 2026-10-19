@@ -1,48 +1,111 @@
-import React from 'react';
-import { View, Text, StyleSheet } from 'react-native';
+import React, { useState, useCallback } from 'react';
+import { View, Text, StyleSheet, Platform, StatusBar } from 'react-native';
 import { NativeModules } from 'react-native';
+import { useFocusEffect, useNavigation } from '@react-navigation/native';
 import CustomButton from '../Components/CustomButton';
 import { Theme } from '../Theme/Theme';
-import { useNavigation } from '@react-navigation/native';
-import { Routes } from '../Constants/Routes';
 
 const { NativeTracking } = NativeModules;
 
 export default function PermissionScreen() {
   const navigation = useNavigation();
+  const [hasUsageAccess, setHasUsageAccess] = useState(false);
+  const [hasNotificationAccess, setHasNotificationAccess] = useState(false);
+
+  const checkPermissions = useCallback(async () => {
+    if (NativeTracking) {
+      try {
+        const usage = await NativeTracking.hasUsageAccess();
+        setHasUsageAccess(!!usage);
+      } catch (e) {
+        console.warn('Error checking usage access:', e);
+      }
+
+      try {
+        if (NativeTracking.hasNotificationAccess) {
+          const notif = await NativeTracking.hasNotificationAccess();
+          setHasNotificationAccess(!!notif);
+        }
+      } catch (e) {
+        console.warn('Error checking notification access:', e);
+      }
+    }
+  }, []);
+
+  useFocusEffect(
+    useCallback(() => {
+      checkPermissions();
+    }, [checkPermissions])
+  );
 
   const handleGrantUsage = () => {
-    if (NativeTracking) {
+    if (NativeTracking?.openUsageSettings) {
       NativeTracking.openUsageSettings();
     }
   };
 
+  const handleGrantNotification = () => {
+    if (NativeTracking?.openNotificationSettings) {
+      NativeTracking.openNotificationSettings();
+    }
+  };
+
   const handleContinue = () => {
-    navigation.replace('MainTabs');
+    navigation.goBack();
   };
 
   return (
     <View style={styles.container}>
-      <Text style={styles.title}>Permissions Required</Text>
+      <StatusBar barStyle="dark-content" backgroundColor="transparent" translucent={true} />
+      <Text style={styles.title}>Permissions & Tracking</Text>
+      <Text style={styles.subtitle}>
+        FocusFlow runs completely offline on your device. We measure digital habits without collecting personal messages or content.
+      </Text>
 
+      {/* Usage Access Card */}
       <View style={styles.card}>
-        <Text style={styles.cardTitle}>Usage Access</Text>
+        <View style={styles.cardHeader}>
+          <Text style={styles.cardTitle}>Usage Access</Text>
+          <View style={[styles.badge, hasUsageAccess ? styles.badgeSuccess : styles.badgeWarning]}>
+            <Text style={[styles.badgeText, hasUsageAccess ? styles.badgeTextSuccess : styles.badgeTextWarning]}>
+              {hasUsageAccess ? '✓ Granted' : 'Required'}
+            </Text>
+          </View>
+        </View>
         <Text style={styles.cardDesc}>
-          FocusFlow needs Usage Access to display your screen-on time and application usage statistics.
+          Required to display exact screen-on time, app transitions, and unlock events within your selected time range.
         </Text>
-        <CustomButton title="Grant Usage Access" onPress={handleGrantUsage} style={styles.button} />
+        <CustomButton
+          title={hasUsageAccess ? 'Usage Access Granted' : 'Grant Usage Access'}
+          onPress={handleGrantUsage}
+          variant={hasUsageAccess ? 'secondary' : 'primary'}
+          style={styles.button}
+        />
       </View>
 
+      {/* Notification Access Card */}
       <View style={styles.card}>
-        <Text style={styles.cardTitle}>Notification Access</Text>
+        <View style={styles.cardHeader}>
+          <Text style={styles.cardTitle}>Notification Access</Text>
+          <View style={[styles.badge, hasNotificationAccess ? styles.badgeSuccess : styles.badgeWarning]}>
+            <Text style={[styles.badgeText, hasNotificationAccess ? styles.badgeTextSuccess : styles.badgeTextWarning]}>
+              {hasNotificationAccess ? '✓ Granted' : 'Required'}
+            </Text>
+          </View>
+        </View>
         <Text style={styles.cardDesc}>
-          To count the distractions caused by notifications correctly, FocusFlow requires Notification Access. We do not store message contents.
+          Count distraction interruptions from incoming notifications. Message content, sender names, and sensitive details are never read or stored.
         </Text>
-        <CustomButton title="Grant Notification Access" onPress={() => console.log('WIP')} style={styles.button} variant="secondary" />
+        <CustomButton
+          title={hasNotificationAccess ? 'Notification Access Granted' : 'Grant Notification Access'}
+          onPress={handleGrantNotification}
+          variant={hasNotificationAccess ? 'secondary' : 'primary'}
+          style={styles.button}
+        />
       </View>
 
       <View style={styles.footer}>
-        <CustomButton title="Skip for now" onPress={handleContinue} variant="secondary" />
+        <CustomButton title="Done" onPress={handleContinue} />
       </View>
     </View>
   );
@@ -51,41 +114,73 @@ export default function PermissionScreen() {
 const styles = StyleSheet.create({
   container: {
     flex: 1,
-    padding: Theme.spacing.lg,
-    backgroundColor: Theme.colors.background,
-    justifyContent: 'center',
+    paddingHorizontal: 20,
+    paddingTop: Platform.OS === 'android' ? (StatusBar.currentHeight || 0) + 24 : 40,
+    backgroundColor: '#F7F8FF',
   },
   title: {
     fontSize: 24,
-    fontWeight: 'bold',
-    color: Theme.colors.text,
-    marginBottom: Theme.spacing.xl,
-    textAlign: 'center',
+    fontWeight: '700',
+    color: '#20283A',
+    marginBottom: 6,
+  },
+  subtitle: {
+    fontSize: 13,
+    color: '#727A91',
+    lineHeight: 18,
+    marginBottom: 24,
   },
   card: {
-    backgroundColor: Theme.colors.surface,
-    padding: Theme.spacing.lg,
-    borderRadius: Theme.borderRadius.lg,
-    marginBottom: Theme.spacing.md,
+    backgroundColor: '#FFFFFF',
+    padding: 18,
+    borderRadius: 20,
+    marginBottom: 16,
     borderWidth: 1,
-    borderColor: Theme.colors.border,
+    borderColor: '#ECEEF5',
+  },
+  cardHeader: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginBottom: 8,
   },
   cardTitle: {
-    fontSize: 18,
-    fontWeight: '600',
-    color: Theme.colors.text,
-    marginBottom: Theme.spacing.sm,
+    fontSize: 16,
+    fontWeight: '700',
+    color: '#20283A',
   },
   cardDesc: {
-    fontSize: 14,
-    color: Theme.colors.textSecondary,
-    marginBottom: Theme.spacing.md,
-    lineHeight: 20,
+    fontSize: 13,
+    color: '#727A91',
+    marginBottom: 14,
+    lineHeight: 19,
+  },
+  badge: {
+    paddingHorizontal: 8,
+    paddingVertical: 3,
+    borderRadius: 12,
+  },
+  badgeSuccess: {
+    backgroundColor: '#DEF7EC',
+  },
+  badgeWarning: {
+    backgroundColor: '#FEF3C7',
+  },
+  badgeText: {
+    fontSize: 11,
+    fontWeight: '600',
+  },
+  badgeTextSuccess: {
+    color: '#03543F',
+  },
+  badgeTextWarning: {
+    color: '#92400E',
   },
   button: {
-    marginTop: Theme.spacing.sm,
+    marginTop: 4,
   },
   footer: {
-    marginTop: Theme.spacing.xl,
-  }
+    marginTop: 'auto',
+    marginBottom: 30,
+  },
 });

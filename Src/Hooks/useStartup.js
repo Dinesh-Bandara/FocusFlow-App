@@ -43,11 +43,17 @@ export function useStartup(initialProps = {}) {
 
     const doNavigate = () => {
       try {
+        const params = action.eventId ? {
+          eventId: action.eventId,
+          sessionTitle: action.eventTitle || null,
+          startTime: action.startTime || null,
+          endTime: action.endTime || null,
+        } : {};
         navigate('MainTabs', {
           screen: Routes.FOCUS,
-          params: action.eventId ? { eventId: action.eventId } : {},
+          params,
         });
-        navigate(Routes.FOCUS, action.eventId ? { eventId: action.eventId } : {});
+        navigate(Routes.FOCUS, params);
       } catch (e) {
         console.warn('Navigation error:', e);
       }
@@ -78,6 +84,9 @@ export function useStartup(initialProps = {}) {
               pendingActionRef.current = {
                 action: 'START_FOCUS',
                 eventId: action.eventId || null,
+                eventTitle: action.eventTitle || null,
+                startTime: action.startTime || null,
+                endTime: action.endTime || null,
               };
             }
           }).catch(error => console.warn('Launch action unavailable:', error))
@@ -121,6 +130,9 @@ export function useStartup(initialProps = {}) {
       pendingActionRef.current = {
         action: 'START_FOCUS',
         eventId: action.eventId || null,
+        eventTitle: action.eventTitle || null,
+        startTime: action.startTime || null,
+        endTime: action.endTime || null,
       };
       onNavigationReady();
     });

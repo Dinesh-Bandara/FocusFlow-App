@@ -89,4 +89,36 @@ export const TargetStorageService = {
             return false;
         }
     },
+
+    getDistractingApps: async () => {
+        try {
+            const val = await AsyncStorage.getItem('@focusflow_distracting_apps');
+            if (val) {
+                const parsed = JSON.parse(val);
+                if (Array.isArray(parsed) && parsed.length > 0) return parsed;
+            }
+        } catch (e) {
+            console.warn('Error reading distracting apps:', e);
+        }
+        return [
+            'com.google.android.youtube',
+            'com.instagram.android',
+            'com.facebook.katana',
+            'com.zhiliaoapp.musically',
+            'com.twitter.android',
+            'com.reddit.frontpage',
+            'com.whatsapp',
+            'com.netflix.mediaclient',
+        ];
+    },
+
+    setDistractingApps: async (appsList) => {
+        try {
+            await AsyncStorage.setItem('@focusflow_distracting_apps', JSON.stringify(appsList));
+            return true;
+        } catch (e) {
+            console.error('Error saving distracting apps:', e);
+            return false;
+        }
+    },
 };

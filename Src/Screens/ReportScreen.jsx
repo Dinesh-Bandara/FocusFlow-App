@@ -15,6 +15,7 @@ import { useFocusEffect } from '@react-navigation/native';
 import Svg, { Path, Rect, Circle, Line, Polyline } from 'react-native-svg';
 import { Theme } from '../Theme/Theme';
 import { FocusStorageService } from '../Services/FocusStorageService';
+import { UsageDataService } from '../Services/UsageDataService';
 
 const { NativeTracking } = NativeModules;
 
@@ -42,38 +43,18 @@ export default function ReportScreen() {
   const [weeklyNotifications, setWeeklyNotifications] = useState(0);
   const [weeklyUsageMs, setWeeklyUsageMs] = useState(0);
 
-  // Derive dynamic date boundaries for selected week
+  // Derive dynamic date boundaries for selected week via UsageDataService
   const weekRange = useMemo(() => {
-    const now = new Date();
-    now.setDate(now.getDate() + selectedWeekOffset * 7);
-
-    const currentDay = now.getDay();
-    const monday = new Date(now);
-    const distanceToMonday = currentDay === 0 ? -6 : 1 - currentDay;
-    monday.setDate(now.getDate() + distanceToMonday);
-    monday.setHours(0, 0, 0, 0);
-
-    const sunday = new Date(monday);
-    sunday.setDate(monday.getDate() + 6);
-    sunday.setHours(23, 59, 59, 999);
-
-    // Prior week
-    const priorMonday = new Date(monday);
-    priorMonday.setDate(monday.getDate() - 7);
-    const priorSunday = new Date(monday);
-    priorSunday.setDate(monday.getDate() - 1);
-    priorSunday.setHours(23, 59, 59, 999);
-
-    const monDate = monday.getDate();
-    const sunDate = sunday.getDate();
-    const monthName = sunday.toLocaleDateString('en-US', { month: 'long' });
+    const current = UsageDataService.getWeekRange(selectedWeekOffset);
+    const prior = UsageDataService.getWeekRange(selectedWeekOffset - 1);
 
     return {
-      weekStartMs: monday.getTime(),
-      weekEndMs: sunday.getTime(),
-      priorWeekStartMs: priorMonday.getTime(),
-      priorWeekEndMs: priorSunday.getTime(),
-      displayStr: `${monDate} – ${sunDate} ${monthName}`,
+      weekStartMs: current.startMs,
+      weekEndMs: current.endMs,
+      queryEndMs: current.queryEndMs,
+      priorWeekStartMs: prior.startMs,
+      priorWeekEndMs: prior.endMs,
+      displayStr: current.displayStr,
     };
   }, [selectedWeekOffset]);
 
@@ -93,15 +74,23 @@ export default function ReportScreen() {
         if (NativeTracking.getUnlockCountRange) {
           const unlocks = await NativeTracking.getUnlockCountRange(
             weekRange.weekStartMs,
-            weekRange.weekEndMs
+            weekRange.queryEndMs
           );
           setWeeklyUnlocks(unlocks || 0);
+        }
+
+        if (NativeTracking.getNotificationCountRange) {
+          const notifs = await NativeTracking.getNotificationCountRange(
+            weekRange.weekStartMs,
+            weekRange.queryEndMs
+          );
+          setWeeklyNotifications(notifs || 0);
         }
 
         if (NativeTracking.getUsageRange) {
           const usage = await NativeTracking.getUsageRange(
             weekRange.weekStartMs,
-            weekRange.weekEndMs
+            weekRange.queryEndMs
           );
           const totalMs = Object.values(usage || {}).reduce((acc, curr) => acc + Number(curr), 0);
           setWeeklyUsageMs(totalMs);
